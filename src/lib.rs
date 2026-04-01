@@ -307,6 +307,7 @@ fn default_allowlisted_commands() -> Vec<String> {
         "sed".to_string(),
         "join".to_string(),
         "awk".to_string(),
+        "jq".to_string(),
         "find".to_string(),
         "ls".to_string(),
         "rev".to_string(),

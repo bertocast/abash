@@ -16,6 +16,7 @@ mod envcmd;
 mod exprcmd;
 mod find;
 mod hashcmd;
+mod jq;
 mod ls;
 mod mv;
 mod odcmd;
@@ -585,6 +586,7 @@ impl VirtualSession {
             "sed" => self.run_sed(cwd, args, stdin, metadata),
             "join" => self.run_join(cwd, args, metadata),
             "awk" => self.run_awk(cwd, args, stdin, metadata),
+            "jq" => self.run_jq(cwd, args, stdin, metadata),
             "find" => self.run_find(cwd, args, metadata),
             "ls" => self.run_ls(cwd, args, metadata),
             "rev" => self.run_rev(cwd, args, stdin, metadata),
@@ -846,7 +848,7 @@ impl VirtualSession {
         command_name: &str,
         args: &[String],
     ) -> Result<Vec<String>, SandboxError> {
-        if command_name != "find" && command_name != "rg" {
+        if command_name != "find" && command_name != "rg" && command_name != "jq" {
             return self.expand_globs(cwd, args.to_vec());
         }
 
@@ -854,6 +856,7 @@ impl VirtualSession {
         let candidates = self.filesystem.list_paths()?;
         let mut literal_next = false;
         let mut rg_pattern_consumed = command_name != "rg";
+        let mut jq_filter_consumed = command_name != "jq";
 
         for arg in args {
             if literal_next {
@@ -875,6 +878,16 @@ impl VirtualSession {
                 }
                 expanded.push(arg.clone());
                 rg_pattern_consumed = true;
+                continue;
+            }
+
+            if command_name == "jq" && !jq_filter_consumed {
+                if arg != "-" && arg.starts_with('-') {
+                    expanded.push(arg.clone());
+                    continue;
+                }
+                expanded.push(arg.clone());
+                jq_filter_consumed = true;
                 continue;
             }
 
@@ -1864,6 +1877,27 @@ impl VirtualSession {
             self.filesystem.read_file(&resolved)
         })?;
         Ok(ExecutionResult::success(rendered, metadata))
+    }
+
+    fn run_jq(
+        &mut self,
+        cwd: &str,
+        args: Vec<String>,
+        stdin: Vec<u8>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        let result = jq::execute(&args, stdin, |path| {
+            let resolved = resolve_sandbox_path(cwd, path)?;
+            self.filesystem.read_file(&resolved)
+        })?;
+        Ok(ExecutionResult {
+            stdout: result.stdout,
+            stderr: Vec::new(),
+            exit_code: result.exit_code,
+            termination_reason: TerminationReason::Exited,
+            error: None,
+            metadata,
+        })
     }
 
     fn run_find(
@@ -3592,6 +3626,7 @@ mod tests {
                 "sed",
                 "join",
                 "awk",
+                "jq",
                 "find",
                 "ls",
                 "rev",

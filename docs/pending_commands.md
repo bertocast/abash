@@ -8,10 +8,10 @@
 - [x] Tier 2: `tree`, `stat`, `file`, `readlink`, `ln`, `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `split`, `od`, `base64`, `md5sum`, `sha1sum`, `sha256sum`
 - [x] Tier 3: `cd`, `export`, `expr`, `time`, `timeout`, `whoami`, `hostname`, `help`, `clear`, `history`, `alias`, `unalias`, `bash`, `sh`
 - [x] Tier 4 start: `curl`
+- [x] Tier 4: `jq`
 
 ## Tier 4
 
-- [ ] `jq`
 - [ ] `yq`
 - [ ] `sqlite3`
 - [ ] `python`

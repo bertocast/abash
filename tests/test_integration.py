@@ -404,6 +404,61 @@ async def test_script_mode_awk_works_in_text_pipelines() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_jq_supports_paths_slices_and_raw_output() -> None:
+    async with Bash() as bash:
+        result = await bash.exec(
+            ["jq", "-r", ".items[] | .name, .tags[-2:]", "/workspace/data.json"]
+        )
+
+    assert result.error is not None
+    assert result.error.kind is ErrorKind.INVALID_REQUEST
+
+    async with Bash() as bash:
+        await bash.write_file(
+            "/workspace/data.json",
+            '{"items":[{"name":"bert","tags":["ops","ml","core"]}]}',
+        )
+        result = await bash.exec(
+            ["jq", "-r", ".items[] | .name, .tags[-2:]", "/workspace/data.json"]
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == 'bert\n[\n  "ml",\n  "core"\n]\n'
+
+
+@pytest.mark.anyio
+async def test_script_mode_jq_works_in_pipelines_without_globbing_filter() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script(
+            """echo '{"items":[{"name":"bert"},{"name":"ana"}]}' | jq -r '.items[] | .name' | tail -n 1"""
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "ana\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_jq_supports_compact_slurp_and_exit_status() -> None:
+    async with Bash() as bash:
+        compact = await bash.exec(
+            ["jq", "-c", "-s", ".", "/workspace/stream.json"]
+        )
+
+    assert compact.error is not None
+    assert compact.error.kind is ErrorKind.INVALID_REQUEST
+
+    async with Bash() as bash:
+        await bash.write_file("/workspace/stream.json", '{"a":1}\n{"b":2}\n')
+        compact = await bash.exec(["jq", "-c", "-s", ".", "/workspace/stream.json"])
+        status = await bash.exec(["jq", "-e", ".missing"], stdin='{"a":1}')
+
+    assert compact.exit_code == 0
+    assert compact.stdout == '[{"a":1},{"b":2}]\n'
+    assert status.exit_code == 1
+    assert status.stdout == "null\n"
+
+
+@pytest.mark.anyio
 async def test_argv_mode_find_supports_name_type_and_depth() -> None:
     async with Bash() as bash:
         await bash.mkdir("/workspace/docs", parents=True)
