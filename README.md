@@ -29,7 +29,7 @@ The current implementation provides:
 - explicit allowlist enforcement
 - timeout and cooperative cancellation plumbing
 - sanitized error propagation
-- shell-first file and text workflows through `env`, `which`, `dirname`, `basename`, `tree`, `stat`, `file`, `readlink`, `ln`, `cat`, `grep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, `tr`, `paste`, `sed`, `join`, `awk`, `find`, `ls`, `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `rm`, `rmdir`, `cp`, `mv`, `tee`, `printf`, `seq`, `date`, `comm`, `diff`, `column`, `xargs`, `rg`, `split`, `od`, `base64`, `md5sum`, `sha1sum`, `sha256sum`, `mkdir`, and `touch`
+- shell-first file and text workflows through a narrow builtin command set
 - typed network-policy configuration kept for future network commands
 - host-side embedding APIs for reading, writing, creating, and checking sandbox files
 - workspace-aware filesystem policy for `memory`, `host_readonly`, `host_cow`, and `host_readwrite`
@@ -38,6 +38,39 @@ The current implementation provides:
 - buffered session audit records plus optional event/audit callbacks
 - script execution through `Bash.exec_script()` and `Bash.exec_detached_script()`
 - safe shell composition for `|`, `<`, `>`, `>>`, `;`, `&&`, and `||`
+
+## Supported Commands
+
+Implemented today on the virtual backend:
+
+- shell/env: `env`, `which`, `dirname`, `basename`, `printf`, `seq`, `date`
+- file/text: `cat`, `grep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, `tr`, `paste`, `sed`, `join`, `awk`, `find`, `ls`, `tree`, `stat`, `file`, `readlink`
+- workspace/filesystem mutation: `ln`, `rm`, `rmdir`, `cp`, `mv`, `mkdir`, `touch`, `tee`
+- inspection/formatting: `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `column`, `comm`, `diff`, `rg`, `split`, `od`
+- encoding/checksums: `base64`, `md5sum`, `sha1sum`, `sha256sum`
+
+Most commands are intentionally partial implementations. `abash` aims for safe, useful workflows first, not full GNU/bash parity.
+
+## Not Yet Implemented
+
+Pending commands from [docs/pending_commands.md](docs/pending_commands.md):
+
+### Tier 3
+
+- `cd`, `export`, `expr`, `time`, `timeout`, `whoami`, `hostname`
+- `help`, `clear`, `history`, `alias`, `unalias`
+- `bash`, `sh`
+
+### Tier 4
+
+- `curl`, `jq`, `yq`, `sqlite3`
+- `python`, `python3`, `js-exec`, `xan`
+- `gzip`, `gunzip`, `zcat`, `tar`
+- `chmod`
+
+### Tier 5
+
+- `egrep`, `fgrep`
 
 ## Filesystem Modes
 
@@ -79,7 +112,7 @@ The current implementation provides:
 - Pipeline execution is buffered and sequential inside the virtual backend; it is not a streaming process graph.
 - Variable expansion applies only in script mode, only for explicit request env plus command-local assignments, and does not expose host env.
 - Globbing currently applies only to expanded script arguments; command names and redirection targets stay literal.
-- Text builtins are intentionally narrow: `env` supports only `-i`, inline `KEY=VALUE`, and optional command execution, `which` checks only the sandbox allowlist, `dirname`/`basename` are path-string transforms, `tree` supports only `-a` and `-L`, `stat` reports only narrow type/size-or-entry metadata, `file` distinguishes only directory, symlink, empty, UTF-8 text, and data, `readlink` returns sanitized workspace targets, `ln` supports only `ln -s TARGET LINK_NAME` and only where the filesystem mode supports symlink creation, `grep` is literal line filtering, `wc` returns aggregate counts, `sort` is lexical line sorting, `uniq` deduplicates adjacent lines, `head`/`tail` support only `-n`, `cut` supports only delimiter-based field selection, `tr` supports only literal equal-length transliteration plus `-d` deletion on UTF-8 text, `paste` joins line columns with an optional single-character delimiter, `sed` supports only literal `s/old/new/` substitution with optional `g`, `join` supports only two pre-sorted inputs with optional `-t`, `-1`, and `-2`, `awk` supports only `print`, optional `-F`, `$0/$N`, `NF/NR/FNR`, and simple `==` / literal `~` filters, `find` supports only path roots plus `-name`, `-type`, and `-maxdepth`, `ls` supports only immediate listings plus optional `-a` and `-l`, `rev` reverses each input line, `nl` numbers every line, `tac` reverses line order, `strings` extracts printable ASCII runs with optional `-n`, `fold` wraps text with optional `-w`, `expand`/`unexpand` support only tabstop conversion with optional `-t` and `unexpand -a`, `rmdir` supports only empty-directory removal plus optional `-p`, `rm` supports only path deletion plus optional `-f` and `-r`, `cp` supports only plain copies plus optional recursive directory copy with `-r`, `mv` supports only path moves without flags, `comm` supports only two UTF-8 sorted inputs plus optional `-1`, `-2`, `-3`, `diff` emits a narrow line-oriented unified diff for two UTF-8 files, `column` aligns only plain text tables with optional `-t` and `-s`, `xargs` supports only whitespace tokenization plus optional `-n`, `rg` is recursive literal search with optional `-n`, `-l`, and `-i`, `split` supports only line-count splitting with `-l`, `od` emits only a narrow hex dump, `base64` supports only encode plus `-d`, `md5sum`/`sha1sum`/`sha256sum` emit standard checksum lines, `tee` supports only stdin passthrough plus optional `-a`, `printf` supports only `%s`, `%%`, and basic escapes, `seq` supports only integer sequences in 1-, 2-, or 3-argument form, and `date` supports only default local timestamp output plus narrow `+FORMAT` tokens.
+- Command behavior is intentionally narrow even when a command name exists. Examples: `env` supports only `-i` plus inline assignments, `tree` only `-a` and `-L`, `sed` only literal `s/old/new/` with optional `g`, `find` only `-name`, `-type`, and `-maxdepth`, `ls` only `-a` and `-l`, `rm` only `-f` and `-r`, `rg` only `-n`, `-l`, and `-i`, `base64` only encode plus `-d`, and `date` only default output plus narrow `+FORMAT` tokens.
 - Unsupported today: global shell variables, broader control flow beyond `if ... then ... [else] ... fi`, functions, subshells, broader fd juggling beyond `2>`, `2>>`, `2>&1`, job control, and TTY semantics.
 
 ## Current Limitations
@@ -98,7 +131,7 @@ The current implementation provides:
 - `crates/core/`: canonical contracts, policy, path rules, session model
 - `crates/backend-virtual/`: default safe backend
 - `crates/backend-nsjail/`: Linux real-shell backend stub
-- `docs/specs/`: normative product and architecture specs
+- `docs/`: project docs and command coverage notes
 - `tests/`: Python integration and property tests
 
 ## Phase Map
