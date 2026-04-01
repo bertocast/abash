@@ -33,18 +33,20 @@ where
     })
 }
 
-pub(crate) fn stat<F, G, H>(
+pub(crate) fn stat<F, G, H, I>(
     cwd: &str,
     args: &[String],
     mut read_file: F,
     mut is_dir: G,
-    mut read_link: H,
+    mut get_mode_bits: H,
+    mut read_link: I,
     candidates: &[String],
 ) -> Result<Vec<u8>, SandboxError>
 where
     F: FnMut(&str) -> Result<Vec<u8>, SandboxError>,
     G: FnMut(&str) -> Result<bool, SandboxError>,
-    H: FnMut(&str) -> Result<Option<String>, SandboxError>,
+    H: FnMut(&str) -> Result<u32, SandboxError>,
+    I: FnMut(&str) -> Result<Option<String>, SandboxError>,
 {
     if args.is_empty() {
         return Err(SandboxError::InvalidRequest(
@@ -56,6 +58,7 @@ where
     for arg in args {
         let resolved = resolve_sandbox_path(cwd, arg)?;
         let mut lines = vec![format!("File: {arg}")];
+        lines.push(format!("Mode: {:04o}", get_mode_bits(&resolved)?));
         if let Some(target) = read_link(&resolved)? {
             lines.push("Type: symbolic link".to_string());
             lines.push(format!("Target: {target}"));

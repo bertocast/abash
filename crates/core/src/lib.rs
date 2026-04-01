@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -415,6 +417,8 @@ pub trait SandboxFilesystem: Send {
     fn delete_path(&mut self, path: &str, recursive: bool) -> Result<(), SandboxError>;
     fn exists(&self, path: &str) -> Result<bool, SandboxError>;
     fn is_dir(&self, path: &str) -> Result<bool, SandboxError>;
+    fn get_mode_bits(&self, path: &str) -> Result<u32, SandboxError>;
+    fn chmod(&mut self, path: &str, mode: u32) -> Result<(), SandboxError>;
     fn list_paths(&self) -> Result<Vec<String>, SandboxError>;
     fn read_link(&self, path: &str) -> Result<Option<String>, SandboxError>;
     fn create_symlink(&mut self, target: &str, link_path: &str) -> Result<(), SandboxError>;
@@ -482,6 +486,7 @@ pub fn create_filesystem(
 pub struct VirtualFilesystem {
     files: HashMap<String, Vec<u8>>,
     directories: HashSet<String>,
+    modes: HashMap<String, u32>,
 }
 
 impl VirtualFilesystem {
@@ -489,9 +494,13 @@ impl VirtualFilesystem {
         let mut directories = HashSet::new();
         directories.insert("/".to_string());
         directories.insert("/workspace".to_string());
+        let mut modes = HashMap::new();
+        modes.insert("/".to_string(), 0o755);
+        modes.insert("/workspace".to_string(), 0o755);
         Self {
             files: HashMap::new(),
             directories,
+            modes,
         }
     }
 
@@ -511,7 +520,8 @@ impl VirtualFilesystem {
                 "parent directory does not exist: {parent}"
             )));
         } else {
-            self.directories.insert(normalized);
+            self.directories.insert(normalized.clone());
+            self.modes.entry(normalized).or_insert(0o755);
         }
         Ok(())
     }
@@ -544,7 +554,8 @@ impl VirtualFilesystem {
                 "parent directory does not exist: {parent}"
             )));
         }
-        self.files.insert(normalized, contents);
+        self.files.insert(normalized.clone(), contents);
+        self.modes.insert(normalized, 0o644);
         Ok(())
     }
 
@@ -594,7 +605,39 @@ impl VirtualFilesystem {
         self.files.retain(|path, _| !path.starts_with(&prefix));
         self.directories
             .retain(|path| path != &normalized && !path.starts_with(&prefix));
+        self.modes
+            .retain(|path, _| path != &normalized && !path.starts_with(&prefix));
         Ok(())
+    }
+
+    pub fn mode_bits(&self, path: &str) -> Result<u32, SandboxError> {
+        let normalized = normalize_sandbox_path(path)?;
+        if self.files.contains_key(&normalized) || self.directories.contains(&normalized) {
+            Ok(*self
+                .modes
+                .get(&normalized)
+                .unwrap_or(if self.directories.contains(&normalized) {
+                    &0o755
+                } else {
+                    &0o644
+                }))
+        } else {
+            Err(SandboxError::InvalidRequest(format!(
+                "path does not exist: {normalized}"
+            )))
+        }
+    }
+
+    pub fn chmod(&mut self, path: &str, mode: u32) -> Result<(), SandboxError> {
+        let normalized = normalize_sandbox_path(path)?;
+        if self.files.contains_key(&normalized) || self.directories.contains(&normalized) {
+            self.modes.insert(normalized, mode & 0o7777);
+            Ok(())
+        } else {
+            Err(SandboxError::InvalidRequest(format!(
+                "path does not exist: {normalized}"
+            )))
+        }
     }
 
     fn ensure_dir_chain(&mut self, path: &str) -> Result<(), SandboxError> {
@@ -604,9 +647,11 @@ impl VirtualFilesystem {
             current.push('/');
             current.push_str(segment);
             self.directories.insert(current.clone());
+            self.modes.entry(current.clone()).or_insert(0o755);
         }
         if normalized == "/" {
             self.directories.insert("/".to_string());
+            self.modes.entry("/".to_string()).or_insert(0o755);
         }
         Ok(())
     }
@@ -659,6 +704,14 @@ impl SandboxFilesystem for MemoryFilesystem {
             .virtual_fs
             .directories
             .contains(&normalize_sandbox_path(path)?))
+    }
+
+    fn get_mode_bits(&self, path: &str) -> Result<u32, SandboxError> {
+        self.virtual_fs.mode_bits(path)
+    }
+
+    fn chmod(&mut self, path: &str, mode: u32) -> Result<(), SandboxError> {
+        self.virtual_fs.chmod(path, mode)
     }
 
     fn list_paths(&self) -> Result<Vec<String>, SandboxError> {
@@ -735,6 +788,16 @@ impl SandboxFilesystem for HostReadonlyFilesystem {
         host_is_dir(&self.root, path)
     }
 
+    fn get_mode_bits(&self, path: &str) -> Result<u32, SandboxError> {
+        host_get_mode(&self.root, path)
+    }
+
+    fn chmod(&mut self, _path: &str, _mode: u32) -> Result<(), SandboxError> {
+        Err(SandboxError::PolicyDenied(
+            "host_readonly mode does not allow chmod".to_string(),
+        ))
+    }
+
     fn list_paths(&self) -> Result<Vec<String>, SandboxError> {
         list_host_paths(&self.root)
     }
@@ -754,6 +817,7 @@ struct HostCowFilesystem {
     root: PathBuf,
     overlay_files: HashMap<String, Vec<u8>>,
     overlay_dirs: HashSet<String>,
+    overlay_modes: HashMap<String, u32>,
 }
 
 impl HostCowFilesystem {
@@ -761,10 +825,14 @@ impl HostCowFilesystem {
         let mut overlay_dirs = HashSet::new();
         overlay_dirs.insert("/".to_string());
         overlay_dirs.insert("/workspace".to_string());
+        let mut overlay_modes = HashMap::new();
+        overlay_modes.insert("/".to_string(), 0o755);
+        overlay_modes.insert("/workspace".to_string(), 0o755);
         Ok(Self {
             root,
             overlay_files: HashMap::new(),
             overlay_dirs,
+            overlay_modes,
         })
     }
 
@@ -775,6 +843,7 @@ impl HostCowFilesystem {
             current.push('/');
             current.push_str(segment);
             self.overlay_dirs.insert(current.clone());
+            self.overlay_modes.entry(current.clone()).or_insert(0o755);
         }
         Ok(())
     }
@@ -815,7 +884,8 @@ impl SandboxFilesystem for HostCowFilesystem {
                 "parent directory does not exist: {parent}"
             )));
         }
-        self.overlay_files.insert(normalized, contents);
+        self.overlay_files.insert(normalized.clone(), contents);
+        self.overlay_modes.insert(normalized, 0o644);
         Ok(())
     }
 
@@ -834,7 +904,8 @@ impl SandboxFilesystem for HostCowFilesystem {
                 "parent directory does not exist: {parent}"
             )));
         } else {
-            self.overlay_dirs.insert(normalized);
+            self.overlay_dirs.insert(normalized.clone());
+            self.overlay_modes.entry(normalized).or_insert(0o755);
         }
         Ok(())
     }
@@ -862,6 +933,8 @@ impl SandboxFilesystem for HostCowFilesystem {
                 .retain(|path, _| !path.starts_with(&prefix));
             self.overlay_dirs
                 .retain(|path| path != &normalized && !path.starts_with(&prefix));
+            self.overlay_modes
+                .retain(|path, _| path != &normalized && !path.starts_with(&prefix));
             return Ok(());
         }
 
@@ -893,6 +966,35 @@ impl SandboxFilesystem for HostCowFilesystem {
             return Ok(false);
         }
         host_is_dir(&self.root, &normalized)
+    }
+
+    fn get_mode_bits(&self, path: &str) -> Result<u32, SandboxError> {
+        let normalized = normalize_workspace_path(path)?;
+        if let Some(mode) = self.overlay_modes.get(&normalized) {
+            return Ok(*mode);
+        }
+        if self.overlay_dirs.contains(&normalized) {
+            return Ok(0o755);
+        }
+        if self.overlay_files.contains_key(&normalized) {
+            return Ok(0o644);
+        }
+        host_get_mode(&self.root, &normalized)
+    }
+
+    fn chmod(&mut self, path: &str, mode: u32) -> Result<(), SandboxError> {
+        let normalized = normalize_workspace_path(path)?;
+        if self.overlay_files.contains_key(&normalized)
+            || self.overlay_dirs.contains(&normalized)
+            || host_exists(&self.root, &normalized)?
+        {
+            self.overlay_modes.insert(normalized, mode & 0o7777);
+            Ok(())
+        } else {
+            Err(SandboxError::InvalidRequest(format!(
+                "path does not exist: {normalized}"
+            )))
+        }
     }
 
     fn list_paths(&self) -> Result<Vec<String>, SandboxError> {
@@ -1040,6 +1142,21 @@ impl SandboxFilesystem for HostReadwriteFilesystem {
 
     fn is_dir(&self, path: &str) -> Result<bool, SandboxError> {
         host_is_dir(&self.root, path)
+    }
+
+    fn get_mode_bits(&self, path: &str) -> Result<u32, SandboxError> {
+        host_get_mode(&self.root, path)
+    }
+
+    fn chmod(&mut self, path: &str, mode: u32) -> Result<(), SandboxError> {
+        let normalized = normalize_workspace_path(path)?;
+        if normalized == "/workspace" {
+            return Err(SandboxError::InvalidRequest(
+                "cannot chmod the workspace root".to_string(),
+            ));
+        }
+        self.ensure_writable(&normalized)?;
+        host_set_mode(&self.root, &normalized, mode)
     }
 
     fn list_paths(&self) -> Result<Vec<String>, SandboxError> {
@@ -1326,6 +1443,77 @@ fn host_read_link(root: &Path, path: &str) -> Result<Option<String>, SandboxErro
     })?;
     let resolved = normalize_link_target(root, candidate.parent().unwrap_or(root), &raw_target)?;
     Ok(Some(resolved))
+}
+
+fn host_get_mode(root: &Path, path: &str) -> Result<u32, SandboxError> {
+    let normalized = normalize_workspace_path(path)?;
+    if normalized == "/workspace" {
+        return Ok(0o755);
+    }
+    let candidate = root.join(sandbox_to_workspace_relative(&normalized)?);
+    let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            SandboxError::InvalidRequest(format!("path does not exist: {normalized}"))
+        } else {
+            SandboxError::BackendFailure(format!("failed to inspect path: {error}"))
+        }
+    })?;
+    if metadata.file_type().is_symlink() {
+        let canonical = fs::canonicalize(&candidate).map_err(|error| {
+            SandboxError::PolicyDenied(format!(
+                "host-backed path could not be resolved safely: {error}"
+            ))
+        })?;
+        ensure_within_root(root, &canonical)?;
+    }
+
+    #[cfg(unix)]
+    {
+        Ok(metadata.permissions().mode() & 0o7777)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        Err(SandboxError::UnsupportedFeature(
+            "chmod is supported only on unix hosts".to_string(),
+        ))
+    }
+}
+
+fn host_set_mode(root: &Path, path: &str, mode: u32) -> Result<(), SandboxError> {
+    let normalized = normalize_workspace_path(path)?;
+    let candidate = root.join(sandbox_to_workspace_relative(&normalized)?);
+    validate_existing_ancestor(root, &candidate, false)?;
+    let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            SandboxError::InvalidRequest(format!("path does not exist: {normalized}"))
+        } else {
+            SandboxError::BackendFailure(format!("failed to inspect path: {error}"))
+        }
+    })?;
+    if metadata.file_type().is_symlink() {
+        let canonical = fs::canonicalize(&candidate).map_err(|error| {
+            SandboxError::PolicyDenied(format!(
+                "host-backed path could not be resolved safely: {error}"
+            ))
+        })?;
+        ensure_within_root(root, &canonical)?;
+    }
+
+    #[cfg(unix)]
+    {
+        let permissions = fs::Permissions::from_mode(mode & 0o7777);
+        fs::set_permissions(&candidate, permissions).map_err(|error| {
+            SandboxError::BackendFailure(format!("failed to set mode bits: {error}"))
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = candidate;
+        Err(SandboxError::UnsupportedFeature(
+            "chmod is supported only on unix hosts".to_string(),
+        ))
+    }
 }
 
 fn host_target_for_write(

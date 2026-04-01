@@ -653,6 +653,31 @@ async def test_argv_mode_tar_blocks_parent_traversal_members() -> None:
     assert result.exit_code == 1
     assert "Path contains '..'" in result.stderr
 
+
+@pytest.mark.anyio
+async def test_argv_mode_chmod_updates_stat_mode_bits() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/demo.txt", "hello chmod")
+        changed = await bash.exec(["chmod", "755", "/workspace/demo.txt"])
+        result = await bash.exec(["stat", "/workspace/demo.txt"])
+
+    assert changed.exit_code == 0
+    assert "Mode: 0755" in result.stdout
+
+
+@pytest.mark.anyio
+async def test_script_mode_chmod_recursive_updates_nested_paths() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/tree/nested", parents=True)
+        await bash.write_file("/workspace/tree/nested/file.txt", "hello recursive chmod")
+        changed = await bash.exec_script("chmod -R 700 /workspace/tree")
+        result = await bash.exec(
+            ["stat", "/workspace/tree", "/workspace/tree/nested", "/workspace/tree/nested/file.txt"]
+        )
+
+    assert changed.exit_code == 0
+    assert result.stdout.count("Mode: 0700") == 3
+
 @pytest.mark.anyio
 async def test_argv_mode_find_supports_name_type_and_depth() -> None:
     async with Bash() as bash:
@@ -988,7 +1013,7 @@ async def test_argv_mode_tree_stat_and_file_report_paths() -> None:
     assert "/workspace/demo" in tree_result.stdout
     assert "nested/" in tree_result.stdout
     assert stat_result.stdout == (
-        "File: /workspace/demo/nested/readme.txt\nType: regular file\nSize: 5\n"
+        "File: /workspace/demo/nested/readme.txt\nMode: 0644\nType: regular file\nSize: 5\n"
     )
     assert file_result.stdout == "/workspace/demo/nested/readme.txt: UTF-8 text\n"
 

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 mod awk;
 mod base64cmd;
+mod chmodcmd;
 mod column;
 mod comm;
 mod cp;
@@ -625,6 +626,7 @@ impl VirtualSession {
             "comm" => self.run_comm(cwd, args, metadata),
             "diff" => self.run_diff(cwd, args, metadata),
             "column" => self.run_column(cwd, args, stdin, metadata),
+            "chmod" => self.run_chmod(cwd, args, metadata),
             "xargs" => self.run_xargs(
                 runtime,
                 cwd,
@@ -2053,10 +2055,59 @@ impl VirtualSession {
             &args,
             |path| self.filesystem.read_file(path),
             |path| self.filesystem.is_dir(path),
+            |path| self.filesystem.get_mode_bits(path),
             |path| self.filesystem.read_link(path),
             &candidates,
         )?;
         Ok(ExecutionResult::success(rendered, metadata))
+    }
+
+    fn run_chmod(
+        &mut self,
+        cwd: &str,
+        args: Vec<String>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        let spec = chmodcmd::parse(cwd, &args)?;
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut exit_code = 0;
+        let mut candidates = self.filesystem.list_paths()?;
+        candidates.sort();
+
+        for target in &spec.targets {
+            if !self.filesystem.exists(target)? {
+                exit_code = 1;
+                stderr.push_str(&format!(
+                    "chmod: cannot access '{}': No such file or directory\n",
+                    target
+                ));
+                continue;
+            }
+
+            let mut paths = vec![target.clone()];
+            if spec.recursive && self.filesystem.is_dir(target)? {
+                paths.extend(chmodcmd::descendant_targets(target, &candidates));
+            }
+
+            for path in paths {
+                let current = self.filesystem.get_mode_bits(&path)?;
+                let next = chmodcmd::resolve_mode(&spec.mode, current)?;
+                self.filesystem.chmod(&path, next)?;
+                if spec.verbose {
+                    stdout.push_str(&format!("mode of '{}' changed to {:04o}\n", path, next));
+                }
+            }
+        }
+
+        Ok(ExecutionResult {
+            stdout: stdout.into_bytes(),
+            stderr: stderr.into_bytes(),
+            exit_code,
+            termination_reason: TerminationReason::Exited,
+            error: None,
+            metadata,
+        })
     }
 
     fn run_file(
@@ -3898,6 +3949,7 @@ mod tests {
                 "comm",
                 "diff",
                 "column",
+                "chmod",
                 "xargs",
                 "rg",
                 "split",

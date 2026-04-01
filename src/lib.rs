@@ -336,6 +336,7 @@ fn default_allowlisted_commands() -> Vec<String> {
         "comm".to_string(),
         "diff".to_string(),
         "column".to_string(),
+        "chmod".to_string(),
         "xargs".to_string(),
         "rg".to_string(),
         "split".to_string(),
