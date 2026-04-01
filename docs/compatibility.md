@@ -64,6 +64,7 @@
 - narrow `sqlite3` with `:memory:` or file-backed databases, SQL from arg or stdin, and `-json` / `-csv` / `-header`: supported
 - narrow `gzip` with stdin/stdout plus `-c` / `-d` / `-k` / `-f` / `-S`: supported
 - narrow `gunzip` as `gzip -d`: supported
+- narrow `zcat` as `gzip -d -c`: supported
 - narrow `find` with path roots plus `-name`, `-type`, and `-maxdepth`: supported
 - narrow `ls` with immediate listings plus optional `-a` and `-l`: supported
 - narrow `rev`, `nl`, and `tac`: supported

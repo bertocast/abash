@@ -589,6 +589,17 @@ async def test_argv_mode_gunzip_restores_gzip_files() -> None:
 
 
 @pytest.mark.anyio
+async def test_script_mode_zcat_decompresses_to_stdout() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/demo.txt", "hello zcat")
+        await bash.exec(["gzip", "/workspace/demo.txt"])
+        result = await bash.exec_script("zcat /workspace/demo.txt.gz")
+
+    assert result.exit_code == 0
+    assert result.stdout == "hello zcat"
+
+
+@pytest.mark.anyio
 async def test_argv_mode_find_supports_name_type_and_depth() -> None:
     async with Bash() as bash:
         await bash.mkdir("/workspace/docs", parents=True)

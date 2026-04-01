@@ -13,6 +13,7 @@
 - [x] Tier 4: `sqlite3`
 - [x] Tier 4: `gzip`
 - [x] Tier 4: `gunzip`
+- [x] Tier 4: `zcat`
 
 ## Tier 4
 
@@ -20,7 +21,6 @@
 - [ ] `python3`
 - [ ] `js-exec`
 - [ ] `xan`
-- [ ] `zcat`
 - [ ] `tar`
 - [ ] `chmod`
 
