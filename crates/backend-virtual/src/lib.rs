@@ -608,6 +608,7 @@ impl VirtualSession {
             "seq" => self.run_seq(args, metadata),
             "date" => self.run_date(args, metadata),
             "gzip" => self.run_gzip(cwd, args, stdin, metadata),
+            "gunzip" => self.run_gunzip(cwd, args, stdin, metadata),
             "sqlite3" => self.run_sqlite3(cwd, args, stdin, metadata),
             "split" => self.run_split(cwd, args, stdin, metadata),
             "od" => self.run_od(cwd, args, stdin, metadata),
@@ -2523,6 +2524,18 @@ impl VirtualSession {
         })
     }
 
+    fn run_gunzip(
+        &mut self,
+        cwd: &str,
+        args: Vec<String>,
+        stdin: Vec<u8>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        let mut forwarded = vec!["-d".to_string()];
+        forwarded.extend(args);
+        self.run_gzip(cwd, forwarded, stdin, metadata)
+    }
+
     fn run_mkdir(
         &mut self,
         cwd: &str,
@@ -3851,6 +3864,7 @@ mod tests {
                 "seq",
                 "date",
                 "gzip",
+                "gunzip",
                 "sqlite3",
                 "comm",
                 "diff",

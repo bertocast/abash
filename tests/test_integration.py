@@ -577,6 +577,18 @@ async def test_script_mode_gzip_works_in_binary_pipelines() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_gunzip_restores_gzip_files() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/demo.txt", "hello gunzip")
+        await bash.exec(["gzip", "/workspace/demo.txt"])
+        result = await bash.exec(["gunzip", "/workspace/demo.txt.gz"])
+        restored = await bash.read_file("/workspace/demo.txt")
+
+    assert result.exit_code == 0
+    assert restored == "hello gunzip"
+
+
+@pytest.mark.anyio
 async def test_argv_mode_find_supports_name_type_and_depth() -> None:
     async with Bash() as bash:
         await bash.mkdir("/workspace/docs", parents=True)

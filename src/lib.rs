@@ -326,6 +326,7 @@ fn default_allowlisted_commands() -> Vec<String> {
         "seq".to_string(),
         "date".to_string(),
         "gzip".to_string(),
+        "gunzip".to_string(),
         "sqlite3".to_string(),
         "mkdir".to_string(),
         "touch".to_string(),
