@@ -9,7 +9,7 @@
 - sanitized error kinds
 - cooperative cancellation for long-running virtual commands
 - host-side file APIs for read/write/mkdir/exists
-- shell-first file and text workflows via `cd`, `export`, `expr`, `time`, `timeout`, `whoami`, `hostname`, `help`, `clear`, `history`, `alias`, `unalias`, `bash`, `sh`, `env`, `which`, `dirname`, `basename`, `curl`, `tree`, `stat`, `file`, `readlink`, `ln`, `cat`, `grep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, `tr`, `paste`, `sed`, `join`, `awk`, `jq`, `yq`, `sqlite3`, `find`, `ls`, `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `rm`, `rmdir`, `cp`, `mv`, `tee`, `printf`, `seq`, `date`, `comm`, `diff`, `column`, `chmod`, `xargs`, `rg`, `split`, `od`, `base64`, `md5sum`, `sha1sum`, `sha256sum`, `gzip`, `tar`, `mkdir`, and `touch`
+- shell-first file and text workflows via `cd`, `export`, `expr`, `time`, `timeout`, `whoami`, `hostname`, `help`, `clear`, `history`, `alias`, `unalias`, `bash`, `sh`, `env`, `which`, `dirname`, `basename`, `curl`, `tree`, `stat`, `file`, `readlink`, `ln`, `cat`, `grep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, `tr`, `paste`, `sed`, `join`, `awk`, `jq`, `yq`, `sqlite3`, `find`, `ls`, `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `rm`, `rmdir`, `cp`, `mv`, `tee`, `printf`, `seq`, `date`, `comm`, `diff`, `column`, `chmod`, `python3`, `xargs`, `rg`, `split`, `od`, `base64`, `md5sum`, `sha1sum`, `sha256sum`, `gzip`, `tar`, `mkdir`, and `touch`
 - typed `NetworkPolicy` configuration surface
 - in-process detached execution via `Bash.exec_detached()`
 - one-active-run session handles with `wait`, `cancel`, `status`, and buffered output accessors
@@ -67,6 +67,7 @@
 - narrow `zcat` as `gzip -d -c`: supported
 - narrow `tar` with `-c` / `-x` / `-t`, optional `-f`, `-C`, `-O`, and `-z`, plus safe extraction: supported
 - narrow `chmod` with numeric or symbolic modes plus optional `-R` and `-v`: supported
+- narrow host-backed `python3` with `-c`, `-m`, script-file, `stdin`, and workspace file sync: supported
 - narrow `find` with path roots plus `-name`, `-type`, and `-maxdepth`: supported
 - narrow `ls` with immediate listings plus optional `-a` and `-l`: supported
 - narrow `rev`, `nl`, and `tac`: supported

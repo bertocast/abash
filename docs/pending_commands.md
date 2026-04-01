@@ -16,11 +16,11 @@
 - [x] Tier 4: `zcat`
 - [x] Tier 4: `tar`
 - [x] Tier 4: `chmod`
+- [x] Tier 4: `python3`
 
 ## Tier 4
 
 - [ ] `python`
-- [ ] `python3`
 - [ ] `js-exec`
 - [ ] `xan`
 

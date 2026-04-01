@@ -678,6 +678,34 @@ async def test_script_mode_chmod_recursive_updates_nested_paths() -> None:
     assert changed.exit_code == 0
     assert result.stdout.count("Mode: 0700") == 3
 
+
+@pytest.mark.anyio
+async def test_argv_mode_python3_executes_inline_code_and_reads_workspace_files() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/demo.txt", "hello python3")
+        result = await bash.exec(
+            ["python3", "-c", "print(open('/workspace/demo.txt').read().strip())"]
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "hello python3\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_python3_syncs_workspace_mutations_back() -> None:
+    async with Bash() as bash:
+        result = await bash.exec(
+            [
+                "python3",
+                "-c",
+                "from pathlib import Path; Path('/workspace/out.txt').write_text('from python3'); print(Path('/workspace/out.txt').read_text())",
+            ]
+        )
+        restored = await bash.read_file("/workspace/out.txt")
+
+    assert result.exit_code == 0
+    assert result.stdout == "from python3\n"
+    assert restored == "from python3"
 @pytest.mark.anyio
 async def test_argv_mode_find_supports_name_type_and_depth() -> None:
     async with Bash() as bash:

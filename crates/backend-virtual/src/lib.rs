@@ -18,12 +18,14 @@ mod exprcmd;
 mod find;
 mod gzipcmd;
 mod hashcmd;
+mod hostexec;
 mod jq;
 mod ls;
 mod mv;
 mod odcmd;
 mod pathcmd;
 mod printf;
+mod python3cmd;
 mod rg;
 mod rm;
 mod rmdir;
@@ -627,6 +629,9 @@ impl VirtualSession {
             "diff" => self.run_diff(cwd, args, metadata),
             "column" => self.run_column(cwd, args, stdin, metadata),
             "chmod" => self.run_chmod(cwd, args, metadata),
+            "python3" => {
+                self.run_python3(cwd, args, stdin, &env, timeout_ms, cancel_flag, metadata)
+            }
             "xargs" => self.run_xargs(
                 runtime,
                 cwd,
@@ -2108,6 +2113,28 @@ impl VirtualSession {
             error: None,
             metadata,
         })
+    }
+
+    fn run_python3(
+        &mut self,
+        cwd: &str,
+        args: Vec<String>,
+        stdin: Vec<u8>,
+        env: &BTreeMap<String, String>,
+        timeout_ms: Option<u64>,
+        cancel_flag: &AtomicBool,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        python3cmd::execute(
+            &mut *self.filesystem,
+            cwd,
+            env,
+            &stdin,
+            &args,
+            timeout_ms,
+            cancel_flag,
+            metadata,
+        )
     }
 
     fn run_file(
@@ -3950,6 +3977,7 @@ mod tests {
                 "diff",
                 "column",
                 "chmod",
+                "python3",
                 "xargs",
                 "rg",
                 "split",

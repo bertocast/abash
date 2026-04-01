@@ -57,7 +57,7 @@ Pending commands from [docs/pending_commands.md](docs/pending_commands.md):
 
 ### Tier 4
 
-- `python`, `python3`, `js-exec`, `xan`
+- `python`, `js-exec`, `xan`
 
 ### Tier 5
 
