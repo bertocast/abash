@@ -14,6 +14,7 @@
 - [x] Tier 4: `gzip`
 - [x] Tier 4: `gunzip`
 - [x] Tier 4: `zcat`
+- [x] Tier 4: `tar`
 
 ## Tier 4
 
@@ -21,7 +22,6 @@
 - [ ] `python3`
 - [ ] `js-exec`
 - [ ] `xan`
-- [ ] `tar`
 - [ ] `chmod`
 
 ## Tier 5

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import re
+import tarfile
 import threading
 
 import anyio
@@ -598,6 +600,58 @@ async def test_script_mode_zcat_decompresses_to_stdout() -> None:
     assert result.exit_code == 0
     assert result.stdout == "hello zcat"
 
+
+@pytest.mark.anyio
+async def test_script_mode_tar_creates_lists_and_extracts_gzip_archives() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/src", parents=True)
+        await bash.write_file("/workspace/src/demo.txt", "hello tar")
+        created = await bash.exec_script(
+            "tar -czf /workspace/demo.tar.gz -C /workspace/src demo.txt"
+        )
+        listed = await bash.exec_script("tar -tzf /workspace/demo.tar.gz")
+        await bash.mkdir("/workspace/out", parents=True)
+        extracted = await bash.exec_script(
+            "tar -xzf /workspace/demo.tar.gz -C /workspace/out"
+        )
+        restored = await bash.read_file("/workspace/out/demo.txt")
+
+    assert created.exit_code == 0
+    assert listed.stdout == "demo.txt\n"
+    assert extracted.exit_code == 0
+    assert restored == "hello tar"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_tar_extracts_to_workspace() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/src", parents=True)
+        await bash.write_file("/workspace/src/data.txt", "hello extract")
+        await bash.exec(["tar", "-cf", "/workspace/data.tar", "-C", "/workspace/src", "data.txt"])
+        await bash.mkdir("/workspace/dest", parents=True)
+        result = await bash.exec(["tar", "-xf", "/workspace/data.tar", "-C", "/workspace/dest"])
+        restored = await bash.read_file("/workspace/dest/data.txt")
+
+    assert result.exit_code == 0
+    assert restored == "hello extract"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_tar_blocks_parent_traversal_members() -> None:
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode="w") as archive:
+        info = tarfile.TarInfo("../escape.txt")
+        body = b"bad"
+        info.size = len(body)
+        archive.addfile(info, io.BytesIO(body))
+
+    async with Bash() as bash:
+        await bash.write_file("/workspace/escape.tar", payload.getvalue())
+        await bash.mkdir("/workspace/out", parents=True)
+        result = await bash.exec(["tar", "-xf", "/workspace/escape.tar", "-C", "/workspace/out"])
+
+    assert result.exit_code == 1
+    assert "Path contains '..'" in result.stderr
 
 @pytest.mark.anyio
 async def test_argv_mode_find_supports_name_type_and_depth() -> None:

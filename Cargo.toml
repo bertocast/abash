@@ -29,6 +29,7 @@ serde_norway = "0.9.42"
 sha1 = "0.10"
 sha2 = "0.10"
 time = { version = "0.3.44", features = ["formatting", "local-offset"] }
+tar = "0.4.45"
 thiserror = "2"
 ureq = "3.3"
 url = "2.5"

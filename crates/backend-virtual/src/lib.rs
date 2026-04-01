@@ -30,6 +30,7 @@ mod script;
 mod seq;
 mod splitcmd;
 mod sqlite3cmd;
+mod tarcmd;
 mod tee;
 mod tier2_files;
 mod tier2_text;
@@ -610,6 +611,7 @@ impl VirtualSession {
             "gzip" => self.run_gzip(cwd, args, stdin, metadata),
             "gunzip" => self.run_gunzip(cwd, args, stdin, metadata),
             "zcat" => self.run_zcat(cwd, args, stdin, metadata),
+            "tar" => self.run_tar(cwd, args, stdin, metadata),
             "sqlite3" => self.run_sqlite3(cwd, args, stdin, metadata),
             "split" => self.run_split(cwd, args, stdin, metadata),
             "od" => self.run_od(cwd, args, stdin, metadata),
@@ -2549,6 +2551,18 @@ impl VirtualSession {
         self.run_gzip(cwd, forwarded, stdin, metadata)
     }
 
+    fn run_tar(
+        &mut self,
+        cwd: &str,
+        args: Vec<String>,
+        stdin: Vec<u8>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        let spec = tarcmd::parse(cwd, &args)?;
+        let rendered = tarcmd::execute(&mut *self.filesystem, cwd, &spec, &stdin)?;
+        Ok(ExecutionResult::success(rendered, metadata))
+    }
+
     fn run_mkdir(
         &mut self,
         cwd: &str,
@@ -3879,6 +3893,7 @@ mod tests {
                 "gzip",
                 "gunzip",
                 "zcat",
+                "tar",
                 "sqlite3",
                 "comm",
                 "diff",
