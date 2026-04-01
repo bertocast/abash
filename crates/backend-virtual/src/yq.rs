@@ -209,7 +209,7 @@ fn append_source_values(
             let text = std::str::from_utf8(bytes).map_err(|_| {
                 SandboxError::InvalidRequest("yq currently requires UTF-8 YAML input".to_string())
             })?;
-            for document in serde_yaml::Deserializer::from_str(text) {
+            for document in serde_norway::Deserializer::from_str(text) {
                 let value = Value::deserialize(document).map_err(|error| {
                     SandboxError::InvalidRequest(format!("yq could not parse YAML input: {error}"))
                 })?;
@@ -248,7 +248,7 @@ fn render_yaml_value(value: &Value) -> Result<String, SandboxError> {
         Value::Number(number) => format!("{number}\n"),
         Value::String(text) => format!("{text}\n"),
         Value::Array(_) | Value::Object(_) => {
-            let mut rendered = serde_yaml::to_string(value).map_err(|error| {
+            let mut rendered = serde_norway::to_string(value).map_err(|error| {
                 SandboxError::BackendFailure(format!("yq could not render YAML output: {error}"))
             })?;
             if let Some(stripped) = rendered.strip_prefix("---\n") {
