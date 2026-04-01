@@ -9,10 +9,10 @@
 - [x] Tier 3: `cd`, `export`, `expr`, `time`, `timeout`, `whoami`, `hostname`, `help`, `clear`, `history`, `alias`, `unalias`, `bash`, `sh`
 - [x] Tier 4 start: `curl`
 - [x] Tier 4: `jq`
+- [x] Tier 4: `yq`
 
 ## Tier 4
 
-- [ ] `yq`
 - [ ] `sqlite3`
 - [ ] `python`
 - [ ] `python3`

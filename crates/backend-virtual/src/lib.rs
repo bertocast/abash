@@ -35,6 +35,7 @@ mod tier3_exec;
 mod tier3_shell;
 mod which;
 mod xargs;
+mod yq;
 
 use abash_core::{
     create_filesystem, resolve_sandbox_path, ExecutionMode, ExecutionRequest, ExecutionResult,
@@ -587,6 +588,7 @@ impl VirtualSession {
             "join" => self.run_join(cwd, args, metadata),
             "awk" => self.run_awk(cwd, args, stdin, metadata),
             "jq" => self.run_jq(cwd, args, stdin, metadata),
+            "yq" => self.run_yq(cwd, args, stdin, metadata),
             "find" => self.run_find(cwd, args, metadata),
             "ls" => self.run_ls(cwd, args, metadata),
             "rev" => self.run_rev(cwd, args, stdin, metadata),
@@ -848,7 +850,11 @@ impl VirtualSession {
         command_name: &str,
         args: &[String],
     ) -> Result<Vec<String>, SandboxError> {
-        if command_name != "find" && command_name != "rg" && command_name != "jq" {
+        if command_name != "find"
+            && command_name != "rg"
+            && command_name != "jq"
+            && command_name != "yq"
+        {
             return self.expand_globs(cwd, args.to_vec());
         }
 
@@ -857,11 +863,19 @@ impl VirtualSession {
         let mut literal_next = false;
         let mut rg_pattern_consumed = command_name != "rg";
         let mut jq_filter_consumed = command_name != "jq";
+        let mut yq_filter_consumed = command_name != "yq";
+        let mut yq_option_value_expected = false;
 
         for arg in args {
             if literal_next {
                 expanded.push(arg.clone());
                 literal_next = false;
+                continue;
+            }
+
+            if yq_option_value_expected {
+                expanded.push(arg.clone());
+                yq_option_value_expected = false;
                 continue;
             }
 
@@ -888,6 +902,27 @@ impl VirtualSession {
                 }
                 expanded.push(arg.clone());
                 jq_filter_consumed = true;
+                continue;
+            }
+
+            if command_name == "yq"
+                && matches!(
+                    arg.as_str(),
+                    "-p" | "--input-format" | "-o" | "--output-format"
+                )
+            {
+                expanded.push(arg.clone());
+                yq_option_value_expected = true;
+                continue;
+            }
+
+            if command_name == "yq" && !yq_filter_consumed {
+                if arg != "-" && arg.starts_with('-') {
+                    expanded.push(arg.clone());
+                    continue;
+                }
+                expanded.push(arg.clone());
+                yq_filter_consumed = true;
                 continue;
             }
 
@@ -1887,6 +1922,27 @@ impl VirtualSession {
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
         let result = jq::execute(&args, stdin, |path| {
+            let resolved = resolve_sandbox_path(cwd, path)?;
+            self.filesystem.read_file(&resolved)
+        })?;
+        Ok(ExecutionResult {
+            stdout: result.stdout,
+            stderr: Vec::new(),
+            exit_code: result.exit_code,
+            termination_reason: TerminationReason::Exited,
+            error: None,
+            metadata,
+        })
+    }
+
+    fn run_yq(
+        &mut self,
+        cwd: &str,
+        args: Vec<String>,
+        stdin: Vec<u8>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        let result = yq::execute(&args, stdin, |path| {
             let resolved = resolve_sandbox_path(cwd, path)?;
             self.filesystem.read_file(&resolved)
         })?;
@@ -3627,6 +3683,7 @@ mod tests {
                 "join",
                 "awk",
                 "jq",
+                "yq",
                 "find",
                 "ls",
                 "rev",

@@ -308,6 +308,7 @@ fn default_allowlisted_commands() -> Vec<String> {
         "join".to_string(),
         "awk".to_string(),
         "jq".to_string(),
+        "yq".to_string(),
         "find".to_string(),
         "ls".to_string(),
         "rev".to_string(),

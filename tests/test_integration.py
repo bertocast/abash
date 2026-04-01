@@ -459,6 +459,49 @@ async def test_argv_mode_jq_supports_compact_slurp_and_exit_status() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_yq_reads_yaml_and_can_emit_json() -> None:
+    async with Bash() as bash:
+        await bash.write_file(
+            "/workspace/data.yaml",
+            "config:\n  host: localhost\n  port: 5432\nitems:\n  - name: bert\n  - name: ana\n",
+        )
+        host = await bash.exec(["yq", ".config.host", "/workspace/data.yaml"])
+        config = await bash.exec(["yq", "-o", "json", "-c", ".config", "/workspace/data.yaml"])
+
+    assert host.exit_code == 0
+    assert host.stdout == "localhost\n"
+    assert config.stdout == '{"host":"localhost","port":5432}\n'
+
+
+@pytest.mark.anyio
+async def test_argv_mode_yq_supports_json_input_and_exit_status() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/data.json", '{"name":"bert","active":true}\n')
+        result = await bash.exec(["yq", "-p", "json", ".name", "/workspace/data.json"])
+        status = await bash.exec(["yq", "-p", "json", "-e", ".missing", "/workspace/data.json"])
+
+    assert result.exit_code == 0
+    assert result.stdout == "bert\n"
+    assert status.exit_code == 1
+    assert status.stdout == "null\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_yq_works_in_pipelines_without_globbing_filter() -> None:
+    async with Bash() as bash:
+        await bash.write_file(
+            "/workspace/data.yaml",
+            "items:\n  - name: bert\n  - name: ana\n",
+        )
+        result = await bash.exec_script(
+            """cat /workspace/data.yaml | yq -r '.items[] | .name' | tail -n 1"""
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "ana\n"
+
+
+@pytest.mark.anyio
 async def test_argv_mode_find_supports_name_type_and_depth() -> None:
     async with Bash() as bash:
         await bash.mkdir("/workspace/docs", parents=True)
