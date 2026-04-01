@@ -9,7 +9,7 @@
 - sanitized error kinds
 - cooperative cancellation for long-running virtual commands
 - host-side file APIs for read/write/mkdir/exists
-- shell-first file and text workflows via `cd`, `export`, `expr`, `time`, `timeout`, `whoami`, `hostname`, `help`, `clear`, `history`, `alias`, `unalias`, `bash`, `sh`, `env`, `which`, `dirname`, `basename`, `curl`, `tree`, `stat`, `file`, `readlink`, `ln`, `cat`, `grep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, `tr`, `paste`, `sed`, `join`, `awk`, `jq`, `yq`, `find`, `ls`, `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `rm`, `rmdir`, `cp`, `mv`, `tee`, `printf`, `seq`, `date`, `comm`, `diff`, `column`, `xargs`, `rg`, `split`, `od`, `base64`, `md5sum`, `sha1sum`, `sha256sum`, `mkdir`, and `touch`
+- shell-first file and text workflows via `cd`, `export`, `expr`, `time`, `timeout`, `whoami`, `hostname`, `help`, `clear`, `history`, `alias`, `unalias`, `bash`, `sh`, `env`, `which`, `dirname`, `basename`, `curl`, `tree`, `stat`, `file`, `readlink`, `ln`, `cat`, `grep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, `tr`, `paste`, `sed`, `join`, `awk`, `jq`, `yq`, `sqlite3`, `find`, `ls`, `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `rm`, `rmdir`, `cp`, `mv`, `tee`, `printf`, `seq`, `date`, `comm`, `diff`, `column`, `xargs`, `rg`, `split`, `od`, `base64`, `md5sum`, `sha1sum`, `sha256sum`, `mkdir`, and `touch`
 - typed `NetworkPolicy` configuration surface
 - in-process detached execution via `Bash.exec_detached()`
 - one-active-run session handles with `wait`, `cancel`, `status`, and buffered output accessors
@@ -61,6 +61,7 @@
 - narrow `ln` with only `-s` and filesystem-mode-dependent symlink creation: supported
 - narrow `jq` with `.`, `.key`, `.[index]`, `.[start:end]`, `.[]`, `|`, `,`, and `-r` / `-c` / `-e` / `-s` / `-n`: supported
 - narrow `yq` with YAML default input/output, optional `-p json`, `-o json`, and jq-lite filters: supported
+- narrow `sqlite3` with `:memory:` or file-backed databases, SQL from arg or stdin, and `-json` / `-csv` / `-header`: supported
 - narrow `find` with path roots plus `-name`, `-type`, and `-maxdepth`: supported
 - narrow `ls` with immediate listings plus optional `-a` and `-l`: supported
 - narrow `rev`, `nl`, and `tac`: supported

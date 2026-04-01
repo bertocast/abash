@@ -21,6 +21,7 @@ base64 = "0.22"
 md-5 = "0.10"
 parking_lot = "0.12"
 pyo3 = { version = "0.22", features = ["extension-module"] }
+rusqlite = { version = "0.39.0", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_norway = "0.9.42"

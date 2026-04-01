@@ -44,7 +44,7 @@ The current implementation provides:
 Implemented today on the virtual backend:
 
 - shell/env: `cd`, `export`, `alias`, `unalias`, `history`, `help`, `clear`, `whoami`, `hostname`, `bash`, `sh`, `env`, `which`, `dirname`, `basename`, `expr`, `time`, `timeout`, `printf`, `seq`, `date`, `curl`
-- file/text: `cat`, `grep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, `tr`, `paste`, `sed`, `join`, `awk`, `jq`, `yq`, `find`, `ls`, `tree`, `stat`, `file`, `readlink`
+- file/text: `cat`, `grep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, `tr`, `paste`, `sed`, `join`, `awk`, `jq`, `yq`, `sqlite3`, `find`, `ls`, `tree`, `stat`, `file`, `readlink`
 - workspace/filesystem mutation: `ln`, `rm`, `rmdir`, `cp`, `mv`, `mkdir`, `touch`, `tee`
 - inspection/formatting: `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `column`, `comm`, `diff`, `rg`, `split`, `od`
 - encoding/checksums: `base64`, `md5sum`, `sha1sum`, `sha256sum`
@@ -57,7 +57,6 @@ Pending commands from [docs/pending_commands.md](docs/pending_commands.md):
 
 ### Tier 4
 
-- `sqlite3`
 - `python`, `python3`, `js-exec`, `xan`
 - `gzip`, `gunzip`, `zcat`, `tar`
 - `chmod`

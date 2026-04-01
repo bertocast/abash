@@ -10,10 +10,10 @@
 - [x] Tier 4 start: `curl`
 - [x] Tier 4: `jq`
 - [x] Tier 4: `yq`
+- [x] Tier 4: `sqlite3`
 
 ## Tier 4
 
-- [ ] `sqlite3`
 - [ ] `python`
 - [ ] `python3`
 - [ ] `js-exec`

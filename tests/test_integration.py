@@ -502,6 +502,59 @@ async def test_script_mode_yq_works_in_pipelines_without_globbing_filter() -> No
 
 
 @pytest.mark.anyio
+async def test_argv_mode_sqlite3_supports_memory_db_and_json_output() -> None:
+    async with Bash() as bash:
+        rows = await bash.exec(
+            [
+                "sqlite3",
+                ":memory:",
+                "CREATE TABLE t(x INT); INSERT INTO t VALUES(1),(2); SELECT * FROM t",
+            ]
+        )
+        rendered = await bash.exec(
+            [
+                "sqlite3",
+                "-json",
+                ":memory:",
+                "CREATE TABLE t(x INT, y TEXT); INSERT INTO t VALUES(1,'bert'); SELECT * FROM t",
+            ]
+        )
+
+    assert rows.exit_code == 0
+    assert rows.stdout == "1\n2\n"
+    assert rendered.stdout == '[{"x":1,"y":"bert"}]\n'
+
+
+@pytest.mark.anyio
+async def test_argv_mode_sqlite3_persists_file_backed_databases() -> None:
+    async with Bash() as bash:
+        await bash.exec(
+            [
+                "sqlite3",
+                "/workspace/demo.db",
+                "CREATE TABLE users(id INT, name TEXT); INSERT INTO users VALUES(1,'ana')",
+            ]
+        )
+        result = await bash.exec(
+            ["sqlite3", "/workspace/demo.db", "SELECT * FROM users"]
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "1|ana\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_sqlite3_reads_sql_from_stdin() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script(
+            """echo "CREATE TABLE t(x); INSERT INTO t VALUES(42); SELECT * FROM t" | sqlite3 :memory:"""
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "42\n"
+
+
+@pytest.mark.anyio
 async def test_argv_mode_find_supports_name_type_and_depth() -> None:
     async with Bash() as bash:
         await bash.mkdir("/workspace/docs", parents=True)

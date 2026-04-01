@@ -28,6 +28,7 @@ mod rmdir;
 mod script;
 mod seq;
 mod splitcmd;
+mod sqlite3cmd;
 mod tee;
 mod tier2_files;
 mod tier2_text;
@@ -605,6 +606,7 @@ impl VirtualSession {
             "printf" => self.run_printf(args, metadata),
             "seq" => self.run_seq(args, metadata),
             "date" => self.run_date(args, metadata),
+            "sqlite3" => self.run_sqlite3(cwd, args, stdin, metadata),
             "split" => self.run_split(cwd, args, stdin, metadata),
             "od" => self.run_od(cwd, args, stdin, metadata),
             "base64" => self.run_base64(cwd, args, stdin, metadata),
@@ -854,6 +856,7 @@ impl VirtualSession {
             && command_name != "rg"
             && command_name != "jq"
             && command_name != "yq"
+            && command_name != "sqlite3"
         {
             return self.expand_globs(cwd, args.to_vec());
         }
@@ -865,6 +868,9 @@ impl VirtualSession {
         let mut jq_filter_consumed = command_name != "jq";
         let mut yq_filter_consumed = command_name != "yq";
         let mut yq_option_value_expected = false;
+        let mut sqlite3_option_value_expected = false;
+        let mut sqlite3_database_consumed = command_name != "sqlite3";
+        let mut sqlite3_sql_consumed = command_name != "sqlite3";
 
         for arg in args {
             if literal_next {
@@ -876,6 +882,12 @@ impl VirtualSession {
             if yq_option_value_expected {
                 expanded.push(arg.clone());
                 yq_option_value_expected = false;
+                continue;
+            }
+
+            if sqlite3_option_value_expected {
+                expanded.push(arg.clone());
+                sqlite3_option_value_expected = false;
                 continue;
             }
 
@@ -923,6 +935,28 @@ impl VirtualSession {
                 }
                 expanded.push(arg.clone());
                 yq_filter_consumed = true;
+                continue;
+            }
+
+            if command_name == "sqlite3" && matches!(arg.as_str(), "-separator" | "-cmd") {
+                expanded.push(arg.clone());
+                sqlite3_option_value_expected = true;
+                continue;
+            }
+
+            if command_name == "sqlite3" && !sqlite3_database_consumed {
+                if arg.starts_with('-') {
+                    expanded.push(arg.clone());
+                    continue;
+                }
+                expanded.push(arg.clone());
+                sqlite3_database_consumed = true;
+                continue;
+            }
+
+            if command_name == "sqlite3" && sqlite3_database_consumed && !sqlite3_sql_consumed {
+                expanded.push(arg.clone());
+                sqlite3_sql_consumed = true;
                 continue;
             }
 
@@ -2373,6 +2407,54 @@ impl VirtualSession {
         Ok(ExecutionResult::success(date::execute(&args)?, metadata))
     }
 
+    fn run_sqlite3(
+        &mut self,
+        cwd: &str,
+        args: Vec<String>,
+        stdin: Vec<u8>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        match sqlite3cmd::parse(&args, &stdin)? {
+            sqlite3cmd::CommandOutcome::Cli {
+                stdout,
+                stderr,
+                exit_code,
+            } => Ok(ExecutionResult {
+                stdout,
+                stderr,
+                exit_code,
+                termination_reason: TerminationReason::Exited,
+                error: None,
+                metadata,
+            }),
+            sqlite3cmd::CommandOutcome::Script(plan) => {
+                let existing_db = if plan.database == ":memory:" {
+                    None
+                } else {
+                    let resolved = resolve_sandbox_path(cwd, &plan.database)?;
+                    if self.filesystem.exists(&resolved)? {
+                        Some(self.filesystem.read_file(&resolved)?)
+                    } else {
+                        None
+                    }
+                };
+                let result = sqlite3cmd::execute(&plan, existing_db)?;
+                if let Some(writeback) = result.writeback {
+                    let resolved = resolve_sandbox_path(cwd, &plan.database)?;
+                    self.filesystem.write_file(&resolved, writeback, true)?;
+                }
+                Ok(ExecutionResult {
+                    stdout: result.stdout,
+                    stderr: result.stderr,
+                    exit_code: result.exit_code,
+                    termination_reason: TerminationReason::Exited,
+                    error: None,
+                    metadata,
+                })
+            }
+        }
+    }
+
     fn run_mkdir(
         &mut self,
         cwd: &str,
@@ -3700,6 +3782,7 @@ mod tests {
                 "printf",
                 "seq",
                 "date",
+                "sqlite3",
                 "comm",
                 "diff",
                 "column",
