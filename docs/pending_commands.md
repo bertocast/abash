@@ -6,23 +6,7 @@
 
 - [x] Tier 1: `env`, `which`, `dirname`, `basename`, `rmdir`, `comm`, `diff`, `column`, `xargs`, `rg`
 - [x] Tier 2: `tree`, `stat`, `file`, `readlink`, `ln`, `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `split`, `od`, `base64`, `md5sum`, `sha1sum`, `sha256sum`
-
-## Tier 3
-
-- [ ] `cd`
-- [ ] `export`
-- [ ] `expr`
-- [ ] `time`
-- [ ] `timeout`
-- [ ] `whoami`
-- [ ] `hostname`
-- [ ] `help`
-- [ ] `clear`
-- [ ] `history`
-- [ ] `alias`
-- [ ] `unalias`
-- [ ] `bash`
-- [ ] `sh`
+- [x] Tier 3: `cd`, `export`, `expr`, `time`, `timeout`, `whoami`, `hostname`, `help`, `clear`, `history`, `alias`, `unalias`, `bash`, `sh`
 
 ## Tier 4
 

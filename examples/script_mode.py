@@ -22,6 +22,16 @@ async def main() -> None:
     echo core > /workspace/teams.txt
     paste -d , /workspace/names.txt /workspace/teams.txt | sed s/core/platform/
     env -i OWNER=berto printenv OWNER
+    export TEAM=core
+    printenv TEAM
+    alias ll='ls -l'
+    ll /workspace | head -n 1
+    unalias ll
+    expr 2 + 3
+    time echo timed
+    timeout 0.01 sleep 0.001
+    whoami
+    hostname
     which rg dirname
     dirname /workspace/people.csv
     basename /workspace/people.csv
@@ -38,7 +48,7 @@ async def main() -> None:
     ls -l /workspace | head -n 2
     printf 'abc\ndef\n' | tac | rev
     printf 'left\nright\n' | nl -ba
-    printf 'a\x00bcdef\n' | strings -n 3
+    printf 'bcdef\n' | strings -n 3
     printf 'abcdef' | fold -w 3
     printf 'a\tb\n' | expand -t 4 | unexpand -a -t 4
     printf 'name role\nbert eng\n' | column -t | tail -n 1
@@ -58,6 +68,8 @@ async def main() -> None:
     md5sum /workspace/name-aa
     sha1sum /workspace/name-aa
     sha256sum /workspace/name-aa
+    bash -c 'export INNER=child; printenv INNER'
+    sh -c 'echo shell-child'
     rm /workspace/fruit.txt
     if false; then echo broken; else echo "${TARGET} recovered"; fi
     false || echo fallback

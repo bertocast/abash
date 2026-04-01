@@ -11,6 +11,7 @@ mod cp;
 mod date;
 mod diffcmd;
 mod envcmd;
+mod exprcmd;
 mod find;
 mod hashcmd;
 mod ls;
@@ -27,6 +28,8 @@ mod splitcmd;
 mod tee;
 mod tier2_files;
 mod tier2_text;
+mod tier3_exec;
+mod tier3_shell;
 mod which;
 mod xargs;
 
@@ -43,11 +46,19 @@ use script::{
 pub fn create_session(config: SandboxConfig) -> Result<Box<dyn SessionBackend>, SandboxError> {
     Ok(Box::new(VirtualSession {
         filesystem: create_filesystem(&config)?,
+        current_cwd: config.default_cwd.clone(),
+        exported_env: BTreeMap::new(),
+        aliases: BTreeMap::new(),
+        history: Vec::new(),
     }))
 }
 
 struct VirtualSession {
     filesystem: Box<dyn SandboxFilesystem>,
+    current_cwd: String,
+    exported_env: BTreeMap<String, String>,
+    aliases: BTreeMap<String, Vec<String>>,
+    history: Vec<String>,
 }
 
 impl SessionBackend for VirtualSession {
@@ -73,12 +84,19 @@ impl SessionBackend for VirtualSession {
             ));
         }
 
-        let cwd = if request.cwd.is_empty() {
-            config.default_cwd.clone()
+        let requested_cwd = if request.cwd.is_empty() {
+            self.current_cwd.clone()
         } else {
             request.cwd.clone()
         };
-        let cwd = resolve_sandbox_path(&config.default_cwd, &cwd)?;
+        let cwd = resolve_sandbox_path(&config.default_cwd, &requested_cwd)?;
+        let mut runtime = RuntimeState::new(
+            cwd,
+            self.current_cwd.clone(),
+            self.exported_env.clone(),
+            request.env.clone(),
+            self.aliases.clone(),
+        );
 
         if cancel_flag.load(Ordering::SeqCst) {
             return Err(SandboxError::Cancellation(
@@ -86,10 +104,18 @@ impl SessionBackend for VirtualSession {
             ));
         }
 
-        match request.mode {
-            ExecutionMode::Argv => self.run_argv(&cwd, request, config, cancel_flag),
-            ExecutionMode::Script => self.run_script(&cwd, request, config, cancel_flag),
-        }
+        self.push_history(render_history_entry(&request));
+
+        let result = match request.mode {
+            ExecutionMode::Argv => self.run_argv(&mut runtime, request, config, cancel_flag),
+            ExecutionMode::Script => self.run_script(&mut runtime, request, config, cancel_flag),
+        };
+
+        self.current_cwd = runtime.persisted_cwd.clone();
+        self.exported_env = runtime.exported_env.clone();
+        self.aliases = runtime.aliases.clone();
+
+        result
     }
 
     fn read_file(&mut self, path: &str) -> Result<Vec<u8>, SandboxError> {
@@ -117,31 +143,35 @@ impl SessionBackend for VirtualSession {
 impl VirtualSession {
     fn run_argv(
         &mut self,
-        cwd: &str,
+        runtime: &mut RuntimeState,
         request: ExecutionRequest,
         config: &SandboxConfig,
         cancel_flag: &AtomicBool,
     ) -> Result<ExecutionResult, SandboxError> {
-        let command = request.argv.first().cloned().ok_or_else(|| {
+        let argv = resolve_alias_words(&request.argv, &runtime.aliases)?;
+        let command = argv.first().cloned().ok_or_else(|| {
             SandboxError::InvalidRequest("argv mode requires a command".to_string())
         })?;
+        let cwd = runtime.cwd.clone();
+        let env = runtime.env.clone();
         self.execute_command(
-            cwd,
-            request.argv.iter().skip(1).cloned().collect::<Vec<_>>(),
+            runtime,
+            &cwd,
+            argv.iter().skip(1).cloned().collect::<Vec<_>>(),
             request.stdin,
             command,
             config,
             cancel_flag,
             request.timeout_ms,
             request.network_enabled,
-            request.env,
+            env,
             request.metadata,
         )
     }
 
     fn run_script(
         &mut self,
-        cwd: &str,
+        runtime: &mut RuntimeState,
         request: ExecutionRequest,
         config: &SandboxConfig,
         cancel_flag: &AtomicBool,
@@ -155,21 +185,24 @@ impl VirtualSession {
         let mut state = ScriptState::default();
 
         if let Err(mut failed) = self.run_steps(
-            cwd,
+            runtime,
             &steps,
             config,
             cancel_flag,
             request.timeout_ms,
             started,
             request.network_enabled,
-            &request.env,
             &request.metadata,
             &mut script_stdin,
             &mut state,
         ) {
             let last_command = failed.metadata.get("command").cloned();
-            failed.metadata =
-                decorate_script_metadata(failed.metadata, cwd, state.executed_steps, last_command);
+            failed.metadata = decorate_script_metadata(
+                failed.metadata,
+                &runtime.cwd,
+                state.executed_steps,
+                last_command,
+            );
             return Ok(failed);
         }
 
@@ -177,27 +210,30 @@ impl VirtualSession {
             let last_command = result.metadata.get("command").cloned();
             result.stdout = state.stdout;
             result.stderr = state.stderr;
-            result.metadata =
-                decorate_script_metadata(result.metadata, cwd, state.executed_steps, last_command);
+            result.metadata = decorate_script_metadata(
+                result.metadata,
+                &runtime.cwd,
+                state.executed_steps,
+                last_command,
+            );
             return Ok(result);
         }
 
         Ok(ExecutionResult::success(
             Vec::new(),
-            decorate_script_metadata(self.base_metadata(cwd), cwd, 0, None),
+            decorate_script_metadata(self.base_metadata(&runtime.cwd), &runtime.cwd, 0, None),
         ))
     }
 
     fn run_steps(
         &mut self,
-        cwd: &str,
+        runtime: &mut RuntimeState,
         steps: &[ScriptStep],
         config: &SandboxConfig,
         cancel_flag: &AtomicBool,
         timeout_ms: Option<u64>,
         started: Instant,
         network_enabled: bool,
-        env: &BTreeMap<String, String>,
         base_metadata: &BTreeMap<String, String>,
         script_stdin: &mut Option<Vec<u8>>,
         state: &mut ScriptState,
@@ -211,20 +247,19 @@ impl VirtualSession {
                 StepKind::Pipeline(pipeline) => {
                     let pipeline_result = self
                         .run_pipeline(
-                            cwd,
+                            runtime,
                             pipeline,
                             config,
                             cancel_flag,
                             timeout_ms,
                             started,
                             network_enabled,
-                            env,
                             base_metadata,
                             script_stdin,
                         )
                         .map_err(|error| {
                             let mut failed =
-                                ExecutionResult::failure(error, self.base_metadata(cwd));
+                                ExecutionResult::failure(error, self.base_metadata(&runtime.cwd));
                             failed.stdout = state.stdout.clone();
                             failed.stderr = state.stderr.clone();
                             failed
@@ -243,14 +278,13 @@ impl VirtualSession {
                     state.last_result = Some(pipeline_result);
                 }
                 StepKind::If(block) => self.run_if_block(
-                    cwd,
+                    runtime,
                     block,
                     config,
                     cancel_flag,
                     timeout_ms,
                     started,
                     network_enabled,
-                    env,
                     base_metadata,
                     script_stdin,
                     state,
@@ -263,33 +297,31 @@ impl VirtualSession {
 
     fn run_if_block(
         &mut self,
-        cwd: &str,
+        runtime: &mut RuntimeState,
         block: &IfBlock,
         config: &SandboxConfig,
         cancel_flag: &AtomicBool,
         timeout_ms: Option<u64>,
         started: Instant,
         network_enabled: bool,
-        env: &BTreeMap<String, String>,
         base_metadata: &BTreeMap<String, String>,
         script_stdin: &mut Option<Vec<u8>>,
         state: &mut ScriptState,
     ) -> Result<(), ExecutionResult> {
         let condition = self
             .run_pipeline(
-                cwd,
+                runtime,
                 &block.condition,
                 config,
                 cancel_flag,
                 timeout_ms,
                 started,
                 network_enabled,
-                env,
                 base_metadata,
                 script_stdin,
             )
             .map_err(|error| {
-                let mut failed = ExecutionResult::failure(error, self.base_metadata(cwd));
+                let mut failed = ExecutionResult::failure(error, self.base_metadata(&runtime.cwd));
                 failed.stdout = state.stdout.clone();
                 failed.stderr = state.stderr.clone();
                 failed
@@ -312,20 +344,19 @@ impl VirtualSession {
         };
 
         if branch_steps.is_empty() {
-            state.last_result = Some(self.if_no_match_result(cwd, base_metadata));
+            state.last_result = Some(self.if_no_match_result(&runtime.cwd, base_metadata));
             return Ok(());
         }
 
         let mut branch_state = ScriptState::default();
         if let Err(mut failed) = self.run_steps(
-            cwd,
+            runtime,
             branch_steps,
             config,
             cancel_flag,
             timeout_ms,
             started,
             network_enabled,
-            env,
             base_metadata,
             script_stdin,
             &mut branch_state,
@@ -340,20 +371,19 @@ impl VirtualSession {
         state.last_result = state
             .last_result
             .clone()
-            .or_else(|| Some(self.if_no_match_result(cwd, base_metadata)));
+            .or_else(|| Some(self.if_no_match_result(&runtime.cwd, base_metadata)));
         Ok(())
     }
 
     fn run_pipeline(
         &mut self,
-        cwd: &str,
+        runtime: &mut RuntimeState,
         pipeline: &Pipeline,
         config: &SandboxConfig,
         cancel_flag: &AtomicBool,
         timeout_ms: Option<u64>,
         started: Instant,
         network_enabled: bool,
-        env: &BTreeMap<String, String>,
         base_metadata: &BTreeMap<String, String>,
         script_stdin: &mut Option<Vec<u8>>,
     ) -> Result<ExecutionResult, SandboxError> {
@@ -363,17 +393,18 @@ impl VirtualSession {
 
         for (index, command) in pipeline.commands.iter().enumerate() {
             validate_pipeline_redirections(pipeline, index, command)?;
-            let command_env = expand_command_env(&command.assignments, env)?;
+            let command_env = expand_command_env(&command.assignments, &runtime.env)?;
             let expanded_argv = expand_words(&command.argv, &command_env)?;
+            let expanded_argv = resolve_alias_words(&expanded_argv, &runtime.aliases)?;
             let command_name = expanded_argv.first().cloned().ok_or_else(|| {
                 SandboxError::InvalidRequest(
                     "script command must expand to at least one command word".to_string(),
                 )
             })?;
-            let args = self.expand_script_args(cwd, &command_name, &expanded_argv[1..])?;
+            let args = self.expand_script_args(&runtime.cwd, &command_name, &expanded_argv[1..])?;
 
             let stdin = if let Some(path) = input_redirect(command) {
-                let resolved = resolve_sandbox_path(cwd, &path.expand(&command_env)?)?;
+                let resolved = resolve_sandbox_path(&runtime.cwd, &path.expand(&command_env)?)?;
                 self.filesystem.read_file(&resolved)?
             } else if let Some(input) = piped_stdin.take() {
                 input
@@ -382,8 +413,10 @@ impl VirtualSession {
             };
 
             let remaining_timeout = remaining_timeout_ms(timeout_ms, started)?;
+            let cwd = runtime.cwd.clone();
             let result = match self.execute_command(
-                cwd,
+                runtime,
+                &cwd,
                 args,
                 stdin,
                 command_name.clone(),
@@ -397,11 +430,11 @@ impl VirtualSession {
                 Ok(result) => result,
                 Err(error) => ExecutionResult::failure(
                     error,
-                    self.command_metadata(cwd, base_metadata.clone(), &command_name),
+                    self.command_metadata(&cwd, base_metadata.clone(), &command_name),
                 ),
             };
             let routed = self.apply_redirects(
-                cwd,
+                &runtime.cwd,
                 &command.redirects,
                 &result.stdout,
                 &result.stderr,
@@ -434,6 +467,7 @@ impl VirtualSession {
 
     fn execute_command(
         &mut self,
+        runtime: &mut RuntimeState,
         cwd: &str,
         args: Vec<String>,
         stdin: Vec<u8>,
@@ -458,6 +492,7 @@ impl VirtualSession {
                 metadata,
             )),
             "env" => self.run_env(
+                runtime,
                 cwd,
                 args,
                 config,
@@ -470,8 +505,49 @@ impl VirtualSession {
             "which" => self.run_which(args, config, metadata),
             "dirname" => self.run_dirname(args, metadata),
             "basename" => self.run_basename(args, metadata),
+            "cd" => self.run_cd(runtime, args, &config.default_cwd, metadata),
+            "export" => self.run_export(runtime, args, env, metadata),
+            "expr" => self.run_expr(args, metadata),
+            "time" => self.run_time(
+                runtime,
+                cwd,
+                args,
+                config,
+                cancel_flag,
+                timeout_ms,
+                network_enabled,
+                metadata,
+            ),
+            "timeout" => self.run_timeout(
+                runtime,
+                cwd,
+                args,
+                config,
+                cancel_flag,
+                timeout_ms,
+                network_enabled,
+                metadata,
+            ),
+            "whoami" => self.run_whoami(args, &env, metadata),
+            "hostname" => self.run_hostname(args, metadata),
+            "help" => self.run_help(config, metadata),
+            "clear" => self.run_clear(args, metadata),
+            "history" => self.run_history(args, metadata),
+            "alias" => self.run_alias(runtime, args, metadata),
+            "unalias" => self.run_unalias(runtime, args, metadata),
+            "bash" | "sh" => self.run_shell_command(
+                runtime,
+                cwd,
+                &command,
+                args,
+                config,
+                cancel_flag,
+                timeout_ms,
+                network_enabled,
+                metadata,
+            ),
             "pwd" => Ok(ExecutionResult::success(
-                format!("{cwd}\n").into_bytes(),
+                format!("{}\n", runtime.cwd).into_bytes(),
                 metadata,
             )),
             "printenv" => Ok(ExecutionResult::success(
@@ -525,6 +601,7 @@ impl VirtualSession {
             "diff" => self.run_diff(cwd, args, metadata),
             "column" => self.run_column(cwd, args, stdin, metadata),
             "xargs" => self.run_xargs(
+                runtime,
                 cwd,
                 args,
                 stdin,
@@ -584,6 +661,70 @@ impl VirtualSession {
             Vec::new(),
             self.command_metadata(cwd, base_metadata.clone(), "if"),
         )
+    }
+
+    fn push_history(&mut self, entry: String) {
+        if !entry.is_empty() {
+            self.history.push(entry);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_nested_script(
+        &mut self,
+        runtime: &RuntimeState,
+        source: String,
+        config: &SandboxConfig,
+        cancel_flag: &AtomicBool,
+        timeout_ms: Option<u64>,
+        network_enabled: bool,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        let steps = parse_script(&source)?;
+        let started = Instant::now();
+        let mut script_stdin = Some(Vec::new());
+        let mut state = ScriptState::default();
+        let mut child = runtime.child();
+
+        if let Err(mut failed) = self.run_steps(
+            &mut child,
+            &steps,
+            config,
+            cancel_flag,
+            timeout_ms,
+            started,
+            network_enabled,
+            &metadata,
+            &mut script_stdin,
+            &mut state,
+        ) {
+            let last_command = failed.metadata.get("command").cloned();
+            failed.metadata = decorate_script_metadata(
+                failed.metadata,
+                &child.cwd,
+                state.executed_steps,
+                last_command,
+            );
+            return Ok(failed);
+        }
+
+        if let Some(mut result) = state.last_result {
+            let last_command = result.metadata.get("command").cloned();
+            result.stdout = state.stdout;
+            result.stderr = state.stderr;
+            result.metadata = decorate_script_metadata(
+                result.metadata,
+                &child.cwd,
+                state.executed_steps,
+                last_command,
+            );
+            return Ok(result);
+        }
+
+        Ok(ExecutionResult::success(
+            Vec::new(),
+            decorate_script_metadata(self.base_metadata(&child.cwd), &child.cwd, 0, None),
+        ))
     }
 
     fn apply_redirects(
@@ -751,6 +892,7 @@ impl VirtualSession {
     #[allow(clippy::too_many_arguments)]
     fn run_env(
         &mut self,
+        runtime: &mut RuntimeState,
         cwd: &str,
         args: Vec<String>,
         config: &SandboxConfig,
@@ -771,7 +913,11 @@ impl VirtualSession {
             ));
         };
 
+        let mut child = runtime.child();
+        child.env = resolved_env.clone();
+        child.exported_env = resolved_env.clone();
         self.execute_command(
+            &mut child,
             cwd,
             spec.args,
             Vec::new(),
@@ -824,6 +970,235 @@ impl VirtualSession {
             pathcmd::basename(&args)?,
             metadata,
         ))
+    }
+
+    fn run_cd(
+        &mut self,
+        runtime: &mut RuntimeState,
+        args: Vec<String>,
+        default_cwd: &str,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        let target = tier3_shell::cd(&runtime.cwd, default_cwd, &args)?;
+        let resolved = resolve_sandbox_path(default_cwd, &target)?;
+        runtime.cwd = resolved.clone();
+        runtime.persisted_cwd = resolved;
+        Ok(ExecutionResult::success(Vec::new(), metadata))
+    }
+
+    fn run_export(
+        &mut self,
+        runtime: &mut RuntimeState,
+        args: Vec<String>,
+        env: BTreeMap<String, String>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        let mut command_env = env;
+        let mut exported_env = runtime.exported_env.clone();
+        let rendered = tier3_shell::export(&args, &mut command_env, &mut exported_env)?;
+        for (name, value) in &exported_env {
+            runtime.env.insert(name.clone(), value.clone());
+        }
+        runtime.exported_env = exported_env;
+        Ok(ExecutionResult::success(rendered, metadata))
+    }
+
+    fn run_expr(
+        &mut self,
+        args: Vec<String>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        Ok(ExecutionResult::success(exprcmd::execute(&args)?, metadata))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_time(
+        &mut self,
+        runtime: &mut RuntimeState,
+        cwd: &str,
+        args: Vec<String>,
+        config: &SandboxConfig,
+        cancel_flag: &AtomicBool,
+        timeout_ms: Option<u64>,
+        network_enabled: bool,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        let (command, command_args) = split_nested_command("time", &args)?;
+        let started = Instant::now();
+        let env = runtime.env.clone();
+        let mut result = self.execute_command(
+            runtime,
+            cwd,
+            command_args,
+            Vec::new(),
+            command,
+            config,
+            cancel_flag,
+            timeout_ms,
+            network_enabled,
+            env,
+            metadata,
+        )?;
+        result.stderr = tier3_exec::render_time(&result.stderr, started.elapsed());
+        Ok(result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_timeout(
+        &mut self,
+        runtime: &mut RuntimeState,
+        cwd: &str,
+        args: Vec<String>,
+        config: &SandboxConfig,
+        cancel_flag: &AtomicBool,
+        timeout_ms: Option<u64>,
+        network_enabled: bool,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        let Some(duration) = args.first() else {
+            return Err(SandboxError::InvalidRequest(
+                "timeout requires a duration and command".to_string(),
+            ));
+        };
+        let limit_ms = tier3_exec::parse_timeout_ms(duration)?;
+        let (command, command_args) = split_nested_command("timeout", &args[1..])?;
+        let nested_timeout = match timeout_ms {
+            Some(existing) => Some(existing.min(limit_ms)),
+            None => Some(limit_ms),
+        };
+        let env = runtime.env.clone();
+        self.execute_command(
+            runtime,
+            cwd,
+            command_args,
+            Vec::new(),
+            command,
+            config,
+            cancel_flag,
+            nested_timeout,
+            network_enabled,
+            env,
+            metadata,
+        )
+    }
+
+    fn run_whoami(
+        &mut self,
+        args: Vec<String>,
+        env: &BTreeMap<String, String>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        Ok(ExecutionResult::success(
+            tier3_shell::whoami(&args, env)?,
+            metadata,
+        ))
+    }
+
+    fn run_hostname(
+        &mut self,
+        args: Vec<String>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        Ok(ExecutionResult::success(
+            tier3_shell::hostname(&args)?,
+            metadata,
+        ))
+    }
+
+    fn run_help(
+        &mut self,
+        config: &SandboxConfig,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        Ok(ExecutionResult::success(
+            tier3_shell::help(&config.allowlisted_commands),
+            metadata,
+        ))
+    }
+
+    fn run_clear(
+        &mut self,
+        args: Vec<String>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        Ok(ExecutionResult::success(
+            tier3_shell::clear(&args)?,
+            metadata,
+        ))
+    }
+
+    fn run_history(
+        &mut self,
+        args: Vec<String>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        if !args.is_empty() {
+            return Err(SandboxError::InvalidRequest(
+                "history does not accept arguments".to_string(),
+            ));
+        }
+        Ok(ExecutionResult::success(
+            tier3_shell::render_history(&self.history),
+            metadata,
+        ))
+    }
+
+    fn run_alias(
+        &mut self,
+        runtime: &mut RuntimeState,
+        args: Vec<String>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        Ok(ExecutionResult::success(
+            tier3_shell::alias(&args, &mut runtime.aliases)?,
+            metadata,
+        ))
+    }
+
+    fn run_unalias(
+        &mut self,
+        runtime: &mut RuntimeState,
+        args: Vec<String>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        tier3_shell::unalias(&args, &mut runtime.aliases)?;
+        Ok(ExecutionResult::success(Vec::new(), metadata))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_shell_command(
+        &mut self,
+        runtime: &mut RuntimeState,
+        cwd: &str,
+        command: &str,
+        args: Vec<String>,
+        config: &SandboxConfig,
+        cancel_flag: &AtomicBool,
+        timeout_ms: Option<u64>,
+        network_enabled: bool,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        let program = tier3_exec::parse_shell_program(&args, command)?;
+        let source = match program {
+            tier3_exec::ShellProgram::Inline(source) => source,
+            tier3_exec::ShellProgram::File(path) => {
+                let resolved = resolve_sandbox_path(cwd, &path)?;
+                String::from_utf8(self.filesystem.read_file(&resolved)?).map_err(|_| {
+                    SandboxError::InvalidRequest(
+                        "bash/sh script files currently require UTF-8 text".to_string(),
+                    )
+                })?
+            }
+        };
+        self.run_nested_script(
+            &runtime.child(),
+            source,
+            config,
+            cancel_flag,
+            timeout_ms,
+            network_enabled,
+            metadata,
+        )
     }
 
     fn run_cat(
@@ -1870,6 +2245,7 @@ impl VirtualSession {
     #[allow(clippy::too_many_arguments)]
     fn run_xargs(
         &mut self,
+        runtime: &mut RuntimeState,
         cwd: &str,
         args: Vec<String>,
         stdin: Vec<u8>,
@@ -1877,7 +2253,7 @@ impl VirtualSession {
         cancel_flag: &AtomicBool,
         timeout_ms: Option<u64>,
         network_enabled: bool,
-        env: BTreeMap<String, String>,
+        _env: BTreeMap<String, String>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
         let spec = xargs::parse_spec(&args)?;
@@ -1889,7 +2265,10 @@ impl VirtualSession {
         let mut last_result = None;
 
         for invocation_args in invocations {
+            let mut child = runtime.child();
+            let child_env = child.env.clone();
             let mut result = self.execute_command(
+                &mut child,
                 cwd,
                 invocation_args,
                 Vec::new(),
@@ -1898,7 +2277,7 @@ impl VirtualSession {
                 cancel_flag,
                 remaining_timeout_ms(timeout_ms, started)?,
                 network_enabled,
-                env.clone(),
+                child_env,
                 metadata.clone(),
             )?;
             stdout.extend(result.stdout.clone());
@@ -2130,6 +2509,39 @@ struct ScriptState {
     executed_steps: usize,
 }
 
+#[derive(Clone, Debug)]
+struct RuntimeState {
+    cwd: String,
+    persisted_cwd: String,
+    env: BTreeMap<String, String>,
+    exported_env: BTreeMap<String, String>,
+    aliases: BTreeMap<String, Vec<String>>,
+}
+
+impl RuntimeState {
+    fn new(
+        cwd: String,
+        persisted_cwd: String,
+        exported_env: BTreeMap<String, String>,
+        request_env: BTreeMap<String, String>,
+        aliases: BTreeMap<String, Vec<String>>,
+    ) -> Self {
+        let mut env = exported_env.clone();
+        env.extend(request_env);
+        Self {
+            cwd,
+            persisted_cwd,
+            env,
+            exported_env,
+            aliases,
+        }
+    }
+
+    fn child(&self) -> Self {
+        self.clone()
+    }
+}
+
 impl ScriptState {
     fn merge(&mut self, other: ScriptState) {
         self.stdout.extend(other.stdout);
@@ -2260,6 +2672,44 @@ fn expand_words(
     env: &BTreeMap<String, String>,
 ) -> Result<Vec<String>, SandboxError> {
     words.iter().map(|word| word.expand(env)).collect()
+}
+
+fn resolve_alias_words(
+    words: &[String],
+    aliases: &BTreeMap<String, Vec<String>>,
+) -> Result<Vec<String>, SandboxError> {
+    if words.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut expanded = words.to_vec();
+    for _ in 0..10 {
+        let Some(alias) = aliases.get(&expanded[0]) else {
+            return Ok(expanded);
+        };
+        if alias.is_empty() {
+            return Ok(expanded);
+        }
+        let mut next = alias.clone();
+        next.extend(expanded.iter().skip(1).cloned());
+        expanded = next;
+    }
+
+    Err(SandboxError::InvalidRequest(
+        "alias expansion exceeded the recursion limit".to_string(),
+    ))
+}
+
+fn split_nested_command(
+    wrapper: &str,
+    args: &[String],
+) -> Result<(String, Vec<String>), SandboxError> {
+    let Some(command) = args.first().cloned() else {
+        return Err(SandboxError::InvalidRequest(format!(
+            "{wrapper} requires a nested command"
+        )));
+    };
+    Ok((command, args.iter().skip(1).cloned().collect::<Vec<_>>()))
 }
 
 fn contains_glob_pattern(value: &str) -> bool {
@@ -2434,6 +2884,13 @@ fn decorate_script_metadata(
         metadata.insert("last_command".to_string(), command);
     }
     metadata
+}
+
+fn render_history_entry(request: &ExecutionRequest) -> String {
+    match request.mode {
+        ExecutionMode::Argv => request.argv.join(" "),
+        ExecutionMode::Script => request.script.clone().unwrap_or_default(),
+    }
 }
 
 fn render_env(env: &BTreeMap<String, String>, args: &[String]) -> String {
@@ -2884,6 +3341,20 @@ mod tests {
                 "which",
                 "dirname",
                 "basename",
+                "cd",
+                "export",
+                "expr",
+                "time",
+                "timeout",
+                "whoami",
+                "hostname",
+                "help",
+                "clear",
+                "history",
+                "alias",
+                "unalias",
+                "bash",
+                "sh",
                 "tree",
                 "stat",
                 "file",
@@ -3128,6 +3599,10 @@ mod tests {
         let config = memory_config();
         let mut session = VirtualSession {
             filesystem: create_filesystem(&config).unwrap(),
+            current_cwd: config.default_cwd.clone(),
+            exported_env: BTreeMap::new(),
+            aliases: BTreeMap::new(),
+            history: Vec::new(),
         };
 
         let merge_into_file = parse_script("echo ok > /workspace/out.txt 2>&1").unwrap();

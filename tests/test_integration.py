@@ -1039,3 +1039,78 @@ async def test_binary_file_helpers_preserve_content() -> None:
         loaded = await bash.read_file("/workspace/bin/blob.dat", binary=True)
 
     assert loaded == payload
+
+
+@pytest.mark.anyio
+async def test_tier3_cd_persists_only_after_cd_builtin() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/demo/inner", parents=True)
+
+        scoped = await bash.exec(["pwd"], cwd="/workspace/demo")
+        before = await bash.exec(["pwd"])
+        changed = await bash.exec_script("cd /workspace/demo/inner; pwd")
+        after = await bash.exec(["pwd"])
+
+    assert scoped.stdout == "/workspace/demo\n"
+    assert before.stdout == "/\n"
+    assert changed.stdout == "/workspace/demo/inner\n"
+    assert after.stdout == "/workspace/demo/inner\n"
+
+
+@pytest.mark.anyio
+async def test_tier3_export_and_history_persist_across_session() -> None:
+    async with Bash() as bash:
+        exported = await bash.exec(["export", "TEAM=core"])
+        env_result = await bash.exec(["printenv", "TEAM"])
+        history = await bash.exec(["history"])
+
+    assert exported.exit_code == 0
+    assert env_result.stdout == "core\n"
+    assert "export TEAM=core" in history.stdout
+    assert "printenv TEAM" in history.stdout
+
+
+@pytest.mark.anyio
+async def test_tier3_alias_and_identity_commands_work() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/demo.txt", "hello")
+        alias_result = await bash.exec(["alias", "ll=ls -l"])
+        listed = await bash.exec(["ll", "/workspace"])
+        help_result = await bash.exec(["help"])
+        whoami = await bash.exec(["whoami"], env={"USER": "berto"})
+        hostname = await bash.exec(["hostname"])
+        cleared = await bash.exec(["clear"])
+        unaliased = await bash.exec(["unalias", "ll"])
+        missing = await bash.exec(["ll"])
+
+    assert alias_result.stdout == "ll='ls -l'\n"
+    assert "demo.txt" in listed.stdout
+    assert "alias" in help_result.stdout
+    assert "timeout" in help_result.stdout
+    assert whoami.stdout == "berto\n"
+    assert hostname.stdout == "abash\n"
+    assert cleared.stdout == "\x1b[H\x1b[2J"
+    assert unaliased.exit_code == 0
+    assert missing.error is not None
+    assert missing.error.kind is ErrorKind.POLICY_DENIED
+
+
+@pytest.mark.anyio
+async def test_tier3_expr_time_timeout_and_nested_shells_work() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/run.sh", "echo from-file\n")
+        expr_result = await bash.exec(["expr", "2", "+", "3"])
+        timed = await bash.exec(["time", "echo", "hello"])
+        timed_out = await bash.exec(["timeout", "0.01", "sleep", "0.05"])
+        inline_bash = await bash.exec(["bash", "-c", "export TEAM=core; printenv TEAM"])
+        after_inline = await bash.exec(["printenv", "TEAM"])
+        file_sh = await bash.exec(["sh", "/workspace/run.sh"])
+
+    assert expr_result.stdout == "5\n"
+    assert timed.stdout == "hello\n"
+    assert re.search(r"real \d+\.\d{3}s\n$", timed.stderr)
+    assert timed_out.error is not None
+    assert timed_out.error.kind is ErrorKind.TIMEOUT
+    assert inline_bash.stdout == "core\n"
+    assert after_inline.stdout == ""
+    assert file_sh.stdout == "from-file\n"

@@ -9,7 +9,7 @@
 - sanitized error kinds
 - cooperative cancellation for long-running virtual commands
 - host-side file APIs for read/write/mkdir/exists
-- shell-first file and text workflows via `env`, `which`, `dirname`, `basename`, `tree`, `stat`, `file`, `readlink`, `ln`, `cat`, `grep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, `tr`, `paste`, `sed`, `join`, `awk`, `find`, `ls`, `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `rm`, `rmdir`, `cp`, `mv`, `tee`, `printf`, `seq`, `date`, `comm`, `diff`, `column`, `xargs`, `rg`, `split`, `od`, `base64`, `md5sum`, `sha1sum`, `sha256sum`, `mkdir`, and `touch`
+- shell-first file and text workflows via `cd`, `export`, `expr`, `time`, `timeout`, `whoami`, `hostname`, `help`, `clear`, `history`, `alias`, `unalias`, `bash`, `sh`, `env`, `which`, `dirname`, `basename`, `tree`, `stat`, `file`, `readlink`, `ln`, `cat`, `grep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, `tr`, `paste`, `sed`, `join`, `awk`, `find`, `ls`, `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `rm`, `rmdir`, `cp`, `mv`, `tee`, `printf`, `seq`, `date`, `comm`, `diff`, `column`, `xargs`, `rg`, `split`, `od`, `base64`, `md5sum`, `sha1sum`, `sha256sum`, `mkdir`, and `touch`
 - typed `NetworkPolicy` configuration surface
 - in-process detached execution via `Bash.exec_detached()`
 - one-active-run session handles with `wait`, `cancel`, `status`, and buffered output accessors
@@ -45,6 +45,14 @@
 - narrow `env` with optional `-i`, inline `KEY=VALUE`, and optional command exec: supported
 - narrow `which` against the sandbox allowlist: supported
 - `dirname` / `basename` path transforms: supported
+- persistent session `cd`: supported
+- persistent `export`: supported
+- narrow `expr` with one binary operator or one literal value: supported
+- narrow `time` and `timeout` wrappers around one nested command: supported
+- narrow `whoami`, `hostname`, `help`, and `clear`: supported
+- buffered per-session `history`: supported
+- narrow `alias` / `unalias`: supported
+- narrow `bash` / `sh` with `-c <script>` or one script path: supported, child-shell state stays isolated
 - narrow `tree` with optional `-a` and `-L`: supported
 - narrow `stat` for type plus file-size-or-entry-count metadata: supported
 - narrow `file` detection for symlink/directory/empty/text/data: supported

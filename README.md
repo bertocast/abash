@@ -43,7 +43,7 @@ The current implementation provides:
 
 Implemented today on the virtual backend:
 
-- shell/env: `env`, `which`, `dirname`, `basename`, `printf`, `seq`, `date`
+- shell/env: `cd`, `export`, `alias`, `unalias`, `history`, `help`, `clear`, `whoami`, `hostname`, `bash`, `sh`, `env`, `which`, `dirname`, `basename`, `expr`, `time`, `timeout`, `printf`, `seq`, `date`
 - file/text: `cat`, `grep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, `tr`, `paste`, `sed`, `join`, `awk`, `find`, `ls`, `tree`, `stat`, `file`, `readlink`
 - workspace/filesystem mutation: `ln`, `rm`, `rmdir`, `cp`, `mv`, `mkdir`, `touch`, `tee`
 - inspection/formatting: `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `column`, `comm`, `diff`, `rg`, `split`, `od`
@@ -54,12 +54,6 @@ Most commands are intentionally partial implementations. `abash` aims for safe, 
 ## Not Yet Implemented
 
 Pending commands from [docs/pending_commands.md](docs/pending_commands.md):
-
-### Tier 3
-
-- `cd`, `export`, `expr`, `time`, `timeout`, `whoami`, `hostname`
-- `help`, `clear`, `history`, `alias`, `unalias`
-- `bash`, `sh`
 
 ### Tier 4
 
