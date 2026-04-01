@@ -11,6 +11,7 @@
 - [x] Tier 4: `jq`
 - [x] Tier 4: `yq`
 - [x] Tier 4: `sqlite3`
+- [x] Tier 4: `gzip`
 
 ## Tier 4
 
@@ -18,7 +19,6 @@
 - [ ] `python3`
 - [ ] `js-exec`
 - [ ] `xan`
-- [ ] `gzip`
 - [ ] `gunzip`
 - [ ] `zcat`
 - [ ] `tar`

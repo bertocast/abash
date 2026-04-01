@@ -15,6 +15,7 @@ mod diffcmd;
 mod envcmd;
 mod exprcmd;
 mod find;
+mod gzipcmd;
 mod hashcmd;
 mod jq;
 mod ls;
@@ -606,6 +607,7 @@ impl VirtualSession {
             "printf" => self.run_printf(args, metadata),
             "seq" => self.run_seq(args, metadata),
             "date" => self.run_date(args, metadata),
+            "gzip" => self.run_gzip(cwd, args, stdin, metadata),
             "sqlite3" => self.run_sqlite3(cwd, args, stdin, metadata),
             "split" => self.run_split(cwd, args, stdin, metadata),
             "od" => self.run_od(cwd, args, stdin, metadata),
@@ -2455,6 +2457,72 @@ impl VirtualSession {
         }
     }
 
+    fn run_gzip(
+        &mut self,
+        cwd: &str,
+        args: Vec<String>,
+        stdin: Vec<u8>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        let spec = gzipcmd::parse(&args)?;
+        if spec.paths.is_empty() || spec.paths.iter().any(|path| path == "-") {
+            let transformed = if spec.decompress {
+                gzipcmd::decompress_bytes(&stdin)?
+            } else {
+                gzipcmd::compress_bytes(&stdin)?
+            };
+            return Ok(ExecutionResult::success(transformed, metadata));
+        }
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut exit_code = 0;
+
+        for path in &spec.paths {
+            let resolved = resolve_sandbox_path(cwd, path)?;
+            let input = self.filesystem.read_file(&resolved)?;
+            let transformed = if spec.decompress {
+                gzipcmd::decompress_bytes(&input)?
+            } else {
+                gzipcmd::compress_bytes(&input)?
+            };
+
+            if spec.stdout {
+                stdout.extend_from_slice(&transformed);
+                continue;
+            }
+
+            let target = if spec.decompress {
+                gzipcmd::decompressed_path(path, &spec.suffix)?
+            } else {
+                gzipcmd::compressed_path(path, &spec.suffix)?
+            };
+            let resolved_target = resolve_sandbox_path(cwd, &target)?;
+            if self.filesystem.exists(&resolved_target)? && !spec.force {
+                exit_code = 1;
+                stderr.extend_from_slice(
+                    format!("gzip: target already exists: {target}\n").as_bytes(),
+                );
+                continue;
+            }
+
+            self.filesystem
+                .write_file(&resolved_target, transformed, true)?;
+            if !spec.keep {
+                self.filesystem.delete_path(&resolved, false)?;
+            }
+        }
+
+        Ok(ExecutionResult {
+            stdout,
+            stderr,
+            exit_code,
+            termination_reason: TerminationReason::Exited,
+            error: None,
+            metadata,
+        })
+    }
+
     fn run_mkdir(
         &mut self,
         cwd: &str,
@@ -3782,6 +3850,7 @@ mod tests {
                 "printf",
                 "seq",
                 "date",
+                "gzip",
                 "sqlite3",
                 "comm",
                 "diff",

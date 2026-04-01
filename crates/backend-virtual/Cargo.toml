@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 abash-core = { path = "../core" }
 base64 = { workspace = true }
+flate2 = { workspace = true }
 md-5 = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }

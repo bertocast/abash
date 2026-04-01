@@ -555,6 +555,28 @@ async def test_script_mode_sqlite3_reads_sql_from_stdin() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_gzip_compresses_files_and_respects_keep_flag() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/demo.txt", "hello gzip")
+        compressed = await bash.exec(["gzip", "-k", "/workspace/demo.txt"])
+        original = await bash.read_file("/workspace/demo.txt")
+        listed = await bash.exec(["ls", "/workspace"])
+
+    assert compressed.exit_code == 0
+    assert original == "hello gzip"
+    assert "demo.txt.gz\n" in listed.stdout
+
+
+@pytest.mark.anyio
+async def test_script_mode_gzip_works_in_binary_pipelines() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script("""echo "hello" | gzip | base64""")
+
+    assert result.exit_code == 0
+    assert result.stdout != ""
+
+
+@pytest.mark.anyio
 async def test_argv_mode_find_supports_name_type_and_depth() -> None:
     async with Bash() as bash:
         await bash.mkdir("/workspace/docs", parents=True)
