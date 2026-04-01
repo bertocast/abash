@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import re
+import threading
 
 import anyio
 import pytest
@@ -14,9 +16,73 @@ from abash import (
     ExecutionProfile,
     ExecutionResult,
     FilesystemMode,
+    NetworkOrigin,
+    NetworkPolicy,
     RunStatus,
 )
 
+
+class _CurlTestHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802
+        self._handle()
+
+    def do_POST(self) -> None:  # noqa: N802
+        self._handle()
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        self._handle(head_only=True)
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A003
+        return
+
+    def _handle(self, head_only: bool = False) -> None:
+        if self.path == "/redirect":
+            self.send_response(302)
+            self.send_header("Location", "/hello")
+            self.end_headers()
+            return
+
+        if self.path == "/hello":
+            body = b"hello from curl\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if not head_only:
+                self.wfile.write(body)
+            return
+
+        if self.path == "/echo":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length)
+            self.server.last_body = body  # type: ignore[attr-defined]
+            self.server.last_header = self.headers.get("X-Injected", "")  # type: ignore[attr-defined]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if not head_only:
+                self.wfile.write(body)
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
+
+class _CurlServer:
+    def __enter__(self) -> "_CurlServer":
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), _CurlTestHandler)
+        self.httpd.last_body = b""  # type: ignore[attr-defined]
+        self.httpd.last_header = ""  # type: ignore[attr-defined]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+        self.base_url = f"http://127.0.0.1:{self.httpd.server_port}"
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=1)
 
 @pytest.mark.anyio
 async def test_allowed_command_round_trip() -> None:
@@ -1114,3 +1180,92 @@ async def test_tier3_expr_time_timeout_and_nested_shells_work() -> None:
     assert inline_bash.stdout == "core\n"
     assert after_inline.stdout == ""
     assert file_sh.stdout == "from-file\n"
+
+
+@pytest.mark.anyio
+async def test_curl_requires_explicit_network_enablement() -> None:
+    with _CurlServer() as server:
+        policy = NetworkPolicy(
+            allowed_origins=[NetworkOrigin(origin=server.base_url)],
+            allowed_methods=["GET"],
+            allowed_schemes=["http"],
+            block_private_ranges=False,
+        )
+        async with Bash(network_policy=policy) as bash:
+            result = await bash.exec(["curl", f"{server.base_url}/hello"])
+
+    assert result.error is not None
+    assert result.error.kind is ErrorKind.POLICY_DENIED
+
+
+@pytest.mark.anyio
+async def test_curl_respects_policy_and_returns_metadata() -> None:
+    with _CurlServer() as server:
+        policy = NetworkPolicy(
+            allowed_origins=[NetworkOrigin(origin=server.base_url)],
+            allowed_methods=["GET"],
+            allowed_schemes=["http"],
+            block_private_ranges=False,
+        )
+        async with Bash(network_policy=policy) as bash:
+            result = await bash.exec(
+                ["curl", "-L", f"{server.base_url}/redirect"], network_enabled=True
+            )
+
+    assert result.exit_code == 0
+    assert result.stdout == "hello from curl\n"
+    assert result.metadata["http_status"] == "200"
+    assert result.metadata["http_method"] == "GET"
+    assert result.metadata["http_final_url"].endswith("/hello")
+    assert result.metadata["http_content_type"] == "text/plain"
+
+
+@pytest.mark.anyio
+async def test_curl_supports_post_output_file_and_injected_headers() -> None:
+    with _CurlServer() as server:
+        policy = NetworkPolicy(
+            allowed_origins=[
+                NetworkOrigin(
+                    origin=server.base_url,
+                    injected_headers={"X-Injected": "secret"},
+                )
+            ],
+            allowed_methods=["POST"],
+            allowed_schemes=["http"],
+            block_private_ranges=False,
+        )
+        async with Bash(network_policy=policy) as bash:
+            result = await bash.exec(
+                [
+                    "curl",
+                    "-o",
+                    "/workspace/echo.txt",
+                    "-d",
+                    "posted",
+                    f"{server.base_url}/echo",
+                ],
+                network_enabled=True,
+            )
+            written = await bash.read_file("/workspace/echo.txt")
+
+    assert result.stdout == ""
+    assert written == "posted"
+    assert server.httpd.last_body == b"posted"  # type: ignore[attr-defined]
+    assert server.httpd.last_header == "secret"  # type: ignore[attr-defined]
+
+
+@pytest.mark.anyio
+async def test_curl_blocks_private_ranges_by_default() -> None:
+    with _CurlServer() as server:
+        policy = NetworkPolicy(
+            allowed_origins=[NetworkOrigin(origin=server.base_url)],
+            allowed_methods=["GET"],
+            allowed_schemes=["http"],
+        )
+        async with Bash(network_policy=policy) as bash:
+            result = await bash.exec(
+                ["curl", f"{server.base_url}/hello"], network_enabled=True
+            )
+
+    assert result.error is not None
+    assert result.error.kind is ErrorKind.POLICY_DENIED

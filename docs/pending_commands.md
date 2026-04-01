@@ -7,10 +7,10 @@
 - [x] Tier 1: `env`, `which`, `dirname`, `basename`, `rmdir`, `comm`, `diff`, `column`, `xargs`, `rg`
 - [x] Tier 2: `tree`, `stat`, `file`, `readlink`, `ln`, `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `split`, `od`, `base64`, `md5sum`, `sha1sum`, `sha256sum`
 - [x] Tier 3: `cd`, `export`, `expr`, `time`, `timeout`, `whoami`, `hostname`, `help`, `clear`, `history`, `alias`, `unalias`, `bash`, `sh`
+- [x] Tier 4 start: `curl`
 
 ## Tier 4
 
-- [ ] `curl`
 - [ ] `jq`
 - [ ] `yq`
 - [ ] `sqlite3`
@@ -31,6 +31,5 @@
 
 ## Notes
 
-- `curl`: preferred future replacement for removed `fetch`
 - `awk`: already shipped; deepen later only if workflows demand it
 - aliases last: `egrep`, `fgrep`

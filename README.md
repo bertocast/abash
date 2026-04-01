@@ -43,7 +43,7 @@ The current implementation provides:
 
 Implemented today on the virtual backend:
 
-- shell/env: `cd`, `export`, `alias`, `unalias`, `history`, `help`, `clear`, `whoami`, `hostname`, `bash`, `sh`, `env`, `which`, `dirname`, `basename`, `expr`, `time`, `timeout`, `printf`, `seq`, `date`
+- shell/env: `cd`, `export`, `alias`, `unalias`, `history`, `help`, `clear`, `whoami`, `hostname`, `bash`, `sh`, `env`, `which`, `dirname`, `basename`, `expr`, `time`, `timeout`, `printf`, `seq`, `date`, `curl`
 - file/text: `cat`, `grep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, `tr`, `paste`, `sed`, `join`, `awk`, `find`, `ls`, `tree`, `stat`, `file`, `readlink`
 - workspace/filesystem mutation: `ln`, `rm`, `rmdir`, `cp`, `mv`, `mkdir`, `touch`, `tee`
 - inspection/formatting: `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `column`, `comm`, `diff`, `rg`, `split`, `od`
@@ -57,7 +57,7 @@ Pending commands from [docs/pending_commands.md](docs/pending_commands.md):
 
 ### Tier 4
 
-- `curl`, `jq`, `yq`, `sqlite3`
+- `jq`, `yq`, `sqlite3`
 - `python`, `python3`, `js-exec`, `xan`
 - `gzip`, `gunzip`, `zcat`, `tar`
 - `chmod`

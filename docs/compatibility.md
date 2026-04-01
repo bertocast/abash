@@ -9,7 +9,7 @@
 - sanitized error kinds
 - cooperative cancellation for long-running virtual commands
 - host-side file APIs for read/write/mkdir/exists
-- shell-first file and text workflows via `cd`, `export`, `expr`, `time`, `timeout`, `whoami`, `hostname`, `help`, `clear`, `history`, `alias`, `unalias`, `bash`, `sh`, `env`, `which`, `dirname`, `basename`, `tree`, `stat`, `file`, `readlink`, `ln`, `cat`, `grep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, `tr`, `paste`, `sed`, `join`, `awk`, `find`, `ls`, `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `rm`, `rmdir`, `cp`, `mv`, `tee`, `printf`, `seq`, `date`, `comm`, `diff`, `column`, `xargs`, `rg`, `split`, `od`, `base64`, `md5sum`, `sha1sum`, `sha256sum`, `mkdir`, and `touch`
+- shell-first file and text workflows via `cd`, `export`, `expr`, `time`, `timeout`, `whoami`, `hostname`, `help`, `clear`, `history`, `alias`, `unalias`, `bash`, `sh`, `env`, `which`, `dirname`, `basename`, `curl`, `tree`, `stat`, `file`, `readlink`, `ln`, `cat`, `grep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, `tr`, `paste`, `sed`, `join`, `awk`, `find`, `ls`, `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `rm`, `rmdir`, `cp`, `mv`, `tee`, `printf`, `seq`, `date`, `comm`, `diff`, `column`, `xargs`, `rg`, `split`, `od`, `base64`, `md5sum`, `sha1sum`, `sha256sum`, `mkdir`, and `touch`
 - typed `NetworkPolicy` configuration surface
 - in-process detached execution via `Bash.exec_detached()`
 - one-active-run session handles with `wait`, `cancel`, `status`, and buffered output accessors
@@ -53,6 +53,7 @@
 - buffered per-session `history`: supported
 - narrow `alias` / `unalias`: supported
 - narrow `bash` / `sh` with `-c <script>` or one script path: supported, child-shell state stays isolated
+- narrow `curl` with policy-gated `-X`, `-d`, `-I`, `-i`, `-o`, and `-L`: supported
 - narrow `tree` with optional `-a` and `-L`: supported
 - narrow `stat` for type plus file-size-or-entry-count metadata: supported
 - narrow `file` detection for symlink/directory/empty/text/data: supported
@@ -97,7 +98,7 @@
 ## Network
 
 - network remains disabled by default
-- no public network-capable builtin currently ships
+- narrow policy-gated `curl` ships on the virtual backend
 - policy covers schemes, origins, optional path prefixes, methods, redirects, timeout, response size, and optional private-range blocking
 - host-injected headers are configured per allowed origin and do not surface in metadata by default
 

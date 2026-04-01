@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -8,6 +9,7 @@ mod base64cmd;
 mod column;
 mod comm;
 mod cp;
+mod curlcmd;
 mod date;
 mod diffcmd;
 mod envcmd;
@@ -42,6 +44,8 @@ use script::{
     parse_script, ChainOp, IfBlock, Pipeline, RedirectSpec, ScriptStep, ScriptWord, SimpleCommand,
     StepKind,
 };
+use ureq::{http, Agent, RequestExt};
+use url::Url;
 
 pub fn create_session(config: SandboxConfig) -> Result<Box<dyn SessionBackend>, SandboxError> {
     Ok(Box::new(VirtualSession {
@@ -502,6 +506,15 @@ impl VirtualSession {
                 env,
                 metadata,
             ),
+            "curl" => self.run_curl(
+                cwd,
+                args,
+                stdin,
+                config,
+                timeout_ms,
+                network_enabled,
+                metadata,
+            ),
             "which" => self.run_which(args, config, metadata),
             "dirname" => self.run_dirname(args, metadata),
             "basename" => self.run_basename(args, metadata),
@@ -929,6 +942,166 @@ impl VirtualSession {
             resolved_env,
             metadata,
         )
+    }
+
+    fn run_curl(
+        &mut self,
+        cwd: &str,
+        args: Vec<String>,
+        stdin: Vec<u8>,
+        config: &SandboxConfig,
+        timeout_ms: Option<u64>,
+        network_enabled: bool,
+        mut metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        if !network_enabled {
+            return Err(SandboxError::PolicyDenied(
+                "network access is disabled for this execution".to_string(),
+            ));
+        }
+        let policy = config.network_policy.as_ref().ok_or_else(|| {
+            SandboxError::PolicyDenied(
+                "network access is disabled unless explicit policy is configured".to_string(),
+            )
+        })?;
+        let spec = curlcmd::parse_spec(&args, stdin)?;
+        let method = abash_core::normalize_http_method(&spec.method)?;
+        policy.allows_method(&method)?;
+
+        let timeout_limit = timeout_ms
+            .map(|limit| limit.min(policy.request_timeout_ms))
+            .unwrap_or(policy.request_timeout_ms);
+        let timeout = Duration::from_millis(timeout_limit);
+        let agent: Agent = Agent::config_builder()
+            .timeout_global(Some(timeout))
+            .timeout_per_call(Some(timeout))
+            .timeout_resolve(Some(timeout))
+            .max_redirects(0)
+            .build()
+            .into();
+
+        let mut current_url = Url::parse(&spec.url).map_err(|error| {
+            SandboxError::InvalidRequest(format!("curl URL must be valid: {error}"))
+        })?;
+        let mut redirects_left = if spec.follow_redirects {
+            5usize
+        } else {
+            0usize
+        };
+
+        loop {
+            let origin = policy.match_url(&current_url)?;
+            let addrs = resolve_remote_addrs(&current_url)?;
+            policy.ensure_remote_addrs(&addrs)?;
+
+            let mut request = http::Request::builder()
+                .method(
+                    http::Method::from_bytes(method.as_bytes()).map_err(|error| {
+                        SandboxError::InvalidRequest(format!("curl method is invalid: {error}"))
+                    })?,
+                )
+                .uri(current_url.as_str());
+            for (name, value) in &origin.injected_headers {
+                request = request.header(name, value);
+            }
+
+            let body = spec.body.clone().unwrap_or_default();
+            let mut response = if body.is_empty() {
+                request
+                    .body(())
+                    .map_err(|error| {
+                        SandboxError::InvalidRequest(format!(
+                            "curl request could not be built: {error}"
+                        ))
+                    })?
+                    .with_agent(&agent)
+                    .configure()
+                    .http_status_as_error(false)
+                    .run()
+                    .map_err(map_ureq_error)?
+            } else {
+                request
+                    .body(body.clone())
+                    .map_err(|error| {
+                        SandboxError::InvalidRequest(format!(
+                            "curl request could not be built: {error}"
+                        ))
+                    })?
+                    .with_agent(&agent)
+                    .configure()
+                    .http_status_as_error(false)
+                    .run()
+                    .map_err(map_ureq_error)?
+            };
+
+            let status = response.status().as_u16();
+            if spec.follow_redirects && is_redirect_status(status) {
+                let Some(location) = response.headers().get("location") else {
+                    return Err(SandboxError::BackendFailure(
+                        "curl redirect response did not include a Location header".to_string(),
+                    ));
+                };
+                if redirects_left == 0 {
+                    return Err(SandboxError::BackendFailure(
+                        "curl exceeded the redirect limit".to_string(),
+                    ));
+                }
+                let location = location.to_str().map_err(|_| {
+                    SandboxError::BackendFailure(
+                        "curl redirect location was not valid text".to_string(),
+                    )
+                })?;
+                current_url = current_url.join(location).map_err(|error| {
+                    SandboxError::BackendFailure(format!(
+                        "curl redirect target was invalid: {error}"
+                    ))
+                })?;
+                redirects_left -= 1;
+                continue;
+            }
+
+            let headers = response
+                .headers()
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.as_str().to_string(),
+                        value.to_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let content_type = response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string);
+            let body = if spec.head_only {
+                Vec::new()
+            } else {
+                response
+                    .body_mut()
+                    .with_config()
+                    .limit(policy.max_response_bytes as u64)
+                    .read_to_vec()
+                    .map_err(map_ureq_error)?
+            };
+            let rendered = curlcmd::render_response(&spec, status, &headers, &body);
+
+            metadata.insert("http_status".to_string(), status.to_string());
+            metadata.insert("http_final_url".to_string(), current_url.to_string());
+            metadata.insert("http_method".to_string(), method.clone());
+            if let Some(content_type) = content_type {
+                metadata.insert("http_content_type".to_string(), content_type);
+            }
+
+            if let Some(path) = &spec.output_path {
+                let resolved = resolve_sandbox_path(cwd, path)?;
+                self.filesystem.write_file(&resolved, rendered, false)?;
+                return Ok(ExecutionResult::success(Vec::new(), metadata));
+            }
+
+            return Ok(ExecutionResult::success(rendered, metadata));
+        }
     }
 
     fn run_which(
@@ -2712,6 +2885,47 @@ fn split_nested_command(
     Ok((command, args.iter().skip(1).cloned().collect::<Vec<_>>()))
 }
 
+fn resolve_remote_addrs(url: &Url) -> Result<Vec<IpAddr>, SandboxError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| SandboxError::InvalidRequest("curl URL must include a host".to_string()))?;
+    let port = url.port_or_known_default().ok_or_else(|| {
+        SandboxError::InvalidRequest("curl URL must include an effective port".to_string())
+    })?;
+    let resolved = format!("{host}:{port}")
+        .to_socket_addrs()
+        .map_err(|error| {
+            SandboxError::BackendFailure(format!("curl could not resolve the remote host: {error}"))
+        })?
+        .map(|addr| addr.ip())
+        .collect::<Vec<_>>();
+    if resolved.is_empty() {
+        return Err(SandboxError::BackendFailure(
+            "curl could not resolve the remote host".to_string(),
+        ));
+    }
+    Ok(resolved)
+}
+
+fn map_ureq_error(error: ureq::Error) -> SandboxError {
+    match error {
+        ureq::Error::Timeout(_) => {
+            SandboxError::Timeout("curl request exceeded the configured timeout".to_string())
+        }
+        ureq::Error::BodyExceedsLimit(_) => SandboxError::BackendFailure(
+            "curl response exceeded the configured size limit".to_string(),
+        ),
+        ureq::Error::HostNotFound => {
+            SandboxError::BackendFailure("curl could not resolve the remote host".to_string())
+        }
+        other => SandboxError::BackendFailure(format!("curl request failed: {other}")),
+    }
+}
+
+fn is_redirect_status(status: u16) -> bool {
+    matches!(status, 301 | 302 | 303 | 307 | 308)
+}
+
 fn contains_glob_pattern(value: &str) -> bool {
     value.contains('*') || value.contains('?') || value.contains('[')
 }
@@ -3360,6 +3574,7 @@ mod tests {
                 "file",
                 "readlink",
                 "ln",
+                "curl",
                 "sleep",
                 "mkdir",
                 "touch",
