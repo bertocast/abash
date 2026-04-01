@@ -1,0 +1,17 @@
+[package]
+name = "abash-backend-virtual"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+abash-core = { path = "../core" }
+base64 = { workspace = true }
+md-5 = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+time = { workspace = true }
+ureq = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

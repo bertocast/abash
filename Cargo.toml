@@ -1,0 +1,38 @@
+[package]
+name = "abash-native"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "abash_native"
+crate-type = ["cdylib"]
+
+[workspace]
+members = [
+  "crates/core",
+  "crates/backend-virtual",
+  "crates/backend-nsjail",
+]
+resolver = "2"
+
+[workspace.dependencies]
+base64 = "0.22"
+md-5 = "0.10"
+parking_lot = "0.12"
+pyo3 = { version = "0.22", features = ["extension-module"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+time = { version = "0.3.44", features = ["formatting", "local-offset"] }
+thiserror = "2"
+ureq = "3.3"
+url = "2.5"
+
+[dependencies]
+abash-backend-nsjail = { path = "crates/backend-nsjail" }
+abash-backend-virtual = { path = "crates/backend-virtual" }
+abash-core = { path = "crates/core" }
+parking_lot = { workspace = true }
+pyo3 = { workspace = true }

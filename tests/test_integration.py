@@ -1,0 +1,1041 @@
+from __future__ import annotations
+
+from pathlib import Path
+import re
+
+import anyio
+import pytest
+
+from abash import (
+    AuditEvent,
+    Bash,
+    RunEvent,
+    ErrorKind,
+    ExecutionProfile,
+    ExecutionResult,
+    FilesystemMode,
+    RunStatus,
+)
+
+
+@pytest.mark.anyio
+async def test_allowed_command_round_trip() -> None:
+    async with Bash() as bash:
+        result = await bash.exec(["echo", "hello", "world"], env={"DEMO": "1"})
+
+    assert result.exit_code == 0
+    assert result.stdout == "hello world\n"
+    assert result.error is None
+    assert result.metadata["backend"] == "virtual"
+
+
+@pytest.mark.anyio
+async def test_argv_metacharacters_are_literal() -> None:
+    async with Bash() as bash:
+        result = await bash.exec(["echo", ";", "&&", "$(uname -a)"])
+
+    assert result.exit_code == 0
+    assert result.stdout == "; && $(uname -a)\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_runs_simple_commands_and_reports_metadata() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script("echo hello; echo world")
+
+    assert result.exit_code == 0
+    assert result.stdout == "hello\nworld\n"
+    assert result.metadata["mode"] == "script"
+    assert result.metadata["commands_executed"] == "2"
+    assert result.metadata["last_command"] == "echo"
+
+
+@pytest.mark.anyio
+async def test_script_mode_supports_pipes_and_redirections() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script(
+            "echo hello > /workspace/demo.txt; cat < /workspace/demo.txt | cat"
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "hello\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_supports_append_and_short_circuiting() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script(
+            "echo one > /workspace/log.txt; false && echo skip; false || echo two >> /workspace/log.txt; cat /workspace/log.txt"
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "one\ntwo\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_supports_stderr_redirect_truncate_and_append() -> None:
+    async with Bash() as bash:
+        first = await bash.exec_script("missing 2> /workspace/err.txt")
+        first_err = await bash.read_file("/workspace/err.txt")
+        second = await bash.exec_script("missing 2>> /workspace/err.txt")
+        combined = await bash.read_file("/workspace/err.txt")
+
+    assert first.error is not None
+    assert first.error.kind is ErrorKind.POLICY_DENIED
+    assert first.stderr == ""
+    assert first_err == "command is not allowlisted: missing"
+    assert second.error is not None
+    assert second.error.kind is ErrorKind.POLICY_DENIED
+    assert second.stderr == ""
+    assert combined == ("command is not allowlisted: missingcommand is not allowlisted: missing")
+
+
+@pytest.mark.anyio
+async def test_script_mode_supports_stderr_to_stdout_redirection() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script("missing 2>&1")
+
+    assert result.error is not None
+    assert result.error.kind is ErrorKind.POLICY_DENIED
+    assert result.stdout == "command is not allowlisted: missing"
+    assert result.stderr == ""
+
+
+@pytest.mark.anyio
+async def test_script_mode_supports_if_then_fi() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script("if true; then echo yes; fi")
+
+    assert result.exit_code == 0
+    assert result.stdout == "yes\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_supports_if_then_else_fi() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script("if false; then echo no; else echo yes; fi")
+
+    assert result.exit_code == 0
+    assert result.stdout == "yes\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_nested_if_blocks_chain_like_commands() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script(
+            "if true; then if false; then echo no; else echo inner; fi; fi && echo done"
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "inner\ndone\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_if_without_else_succeeds_when_condition_is_false() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script("if false; then echo no; fi && echo done")
+
+    assert result.exit_code == 0
+    assert result.stdout == "done\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_text_builtins_support_stdin_and_exit_codes() -> None:
+    async with Bash() as bash:
+        grep_hit = await bash.exec(["grep", "beta"], stdin="alpha\nbeta\n")
+        grep_miss = await bash.exec(["grep", "gamma"], stdin="alpha\nbeta\n")
+        wc_result = await bash.exec(["wc", "-l", "-w", "-c"], stdin="one two\nthree\n")
+
+    assert grep_hit.exit_code == 0
+    assert grep_hit.stdout == "beta\n"
+    assert grep_miss.exit_code == 1
+    assert grep_miss.stdout == ""
+    assert wc_result.stdout == "2 3 14\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_text_builtins_support_pipelines_and_files() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/text.txt", "pear\napple\npear\nbanana\n")
+        result = await bash.exec_script("cat /workspace/text.txt | grep a | sort -r | uniq | wc -l")
+
+    assert result.exit_code == 0
+    assert result.stdout == "3\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_uniq_count_and_grep_numbered_output() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/log.txt", "ok\nok\nwarn\nwarn\nwarn\n")
+        result = await bash.exec_script(
+            "cat /workspace/log.txt | uniq -c > /workspace/uniq.txt; grep -n warn /workspace/uniq.txt"
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "2:3 warn\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_grep_works_inside_if_control_flow() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/demo.txt", "alpha\nbeta\n")
+        result = await bash.exec_script(
+            "if grep beta /workspace/demo.txt; then echo hit; else echo miss; fi"
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "beta\nhit\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_head_tail_and_cut_support_stdin() -> None:
+    async with Bash() as bash:
+        head_result = await bash.exec(["head", "-n", "2"], stdin="a\nb\nc\nd\n")
+        tail_result = await bash.exec(["tail", "-n", "2"], stdin="a\nb\nc\nd\n")
+        cut_result = await bash.exec(
+            ["cut", "-d", ",", "-f", "2,3"],
+            stdin="name,role,team\nbert,eng,core\n",
+        )
+
+    assert head_result.stdout == "a\nb\n"
+    assert tail_result.stdout == "c\nd\n"
+    assert cut_result.stdout == "role,team\neng,core\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_head_tail_and_cut_work_in_pipelines() -> None:
+    async with Bash() as bash:
+        await bash.write_file(
+            "/workspace/people.csv",
+            "name,role,team\nbert,eng,core\nana,pm,product\nleo,eng,infra\n",
+        )
+        result = await bash.exec_script(
+            "cat /workspace/people.csv | tail -n 2 | cut -d , -f 1,3 | head -n 1"
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "ana,product\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_tr_supports_translation_and_delete() -> None:
+    async with Bash() as bash:
+        translated = await bash.exec(["tr", "abc", "xyz"], stdin="cab\n")
+        deleted = await bash.exec(["tr", "-d", "aeiou"], stdin="hello world\n")
+
+    assert translated.stdout == "zxy\n"
+    assert deleted.stdout == "hll wrld\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_tr_works_in_text_pipelines() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/raw.txt", "bert,core\nana,product\n")
+        result = await bash.exec_script(
+            "cat /workspace/raw.txt | tr , : | cut -d : -f 2 | head -n 1"
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "core\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_paste_and_sed_support_text_transforms() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/left.txt", "bert\nana\n")
+        await bash.write_file("/workspace/right.txt", "core\nproduct\n")
+        pasted = await bash.exec(
+            ["paste", "-d", ",", "/workspace/left.txt", "/workspace/right.txt"]
+        )
+        sed_result = await bash.exec(["sed", "s/o/O/g"], stdin="core\nproduct\n")
+
+    assert pasted.stdout == "bert,core\nana,product\n"
+    assert sed_result.stdout == "cOre\nprOduct\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_paste_and_sed_work_in_pipelines() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/names.txt", "bert\nana\n")
+        await bash.write_file("/workspace/teams.txt", "core\nproduct\n")
+        result = await bash.exec_script(
+            "paste -d , /workspace/names.txt /workspace/teams.txt | sed s/product/growth/ | head -n 1"
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "bert,core\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_join_supports_default_and_custom_fields() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/people.txt", "1 bert\n2 ana\n")
+        await bash.write_file("/workspace/teams.txt", "1 core\n2 product\n")
+        await bash.write_file("/workspace/names.csv", "bert,1\nana,2\n")
+        await bash.write_file("/workspace/orgs.csv", "core,1\ngrowth,2\n")
+        default_join = await bash.exec(["join", "/workspace/people.txt", "/workspace/teams.txt"])
+        field_join = await bash.exec(
+            [
+                "join",
+                "-t",
+                ",",
+                "-1",
+                "2",
+                "-2",
+                "2",
+                "/workspace/names.csv",
+                "/workspace/orgs.csv",
+            ]
+        )
+
+    assert default_join.stdout == "1 bert core\n2 ana product\n"
+    assert field_join.stdout == "1,bert,core\n2,ana,growth\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_join_works_in_text_pipelines() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/names.csv", "bert,1\nana,2\n")
+        await bash.write_file("/workspace/orgs.csv", "core,1\ngrowth,2\n")
+        result = await bash.exec_script(
+            "join -t , -1 2 -2 2 /workspace/names.csv /workspace/orgs.csv | sed s/growth/product/ | tail -n 1"
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "2,ana,product\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_awk_supports_field_filters_and_counters() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/people_a.csv", "bert,core\nana,product\n")
+        await bash.write_file("/workspace/people_b.csv", "cami,core\n")
+        result = await bash.exec(
+            [
+                "awk",
+                "-F",
+                ",",
+                '$2 == "core" { print $1, NR, FNR, NF }',
+                "/workspace/people_a.csv",
+                "/workspace/people_b.csv",
+            ]
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "bert 1 1 2\ncami 3 1 2\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_awk_works_in_text_pipelines() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/people.csv", "bert,core\nana,product\n")
+        result = await bash.exec_script(
+            """cat /workspace/people.csv | awk -F , '$2 == "product" { print $1 }' | head -n 1"""
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "ana\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_find_supports_name_type_and_depth() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/docs", parents=True)
+        await bash.write_file("/workspace/demo.txt", "root")
+        await bash.write_file("/workspace/docs/readme.txt", "nested")
+        await bash.write_file("/workspace/docs/data.csv", "nested")
+        result = await bash.exec(
+            ["find", "/workspace", "-name", "*.txt", "-type", "f", "-maxdepth", "1"]
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "/workspace/demo.txt\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_find_works_in_text_pipelines() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/docs", parents=True)
+        await bash.write_file("/workspace/docs/readme.txt", "bert")
+        await bash.write_file("/workspace/docs/data.csv", "ana")
+        result = await bash.exec_script('find /workspace/docs -name "*.txt" -type f | tail -n 1')
+
+    assert result.exit_code == 0
+    assert result.stdout == "/workspace/docs/readme.txt\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_ls_supports_a_and_l() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/docs", parents=True)
+        await bash.write_file("/workspace/demo.txt", "root")
+        await bash.write_file("/workspace/.env", "secret")
+        plain = await bash.exec(["ls", "/workspace"])
+        detailed = await bash.exec(["ls", "-a", "-l", "/workspace"])
+
+    assert plain.stdout == "demo.txt\ndocs\n"
+    assert detailed.stdout == "- .env\n- demo.txt\nd docs\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_ls_works_in_text_pipelines() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/docs", parents=True)
+        await bash.write_file("/workspace/demo.txt", "root")
+        result = await bash.exec_script("ls -l /workspace | tail -n 1")
+
+    assert result.exit_code == 0
+    assert result.stdout == "d docs\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_rm_supports_force_and_recursive_delete() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/docs/nested", parents=True)
+        await bash.write_file("/workspace/demo.txt", "root")
+        await bash.write_file("/workspace/docs/nested/readme.txt", "nested")
+        removed_file = await bash.exec(["rm", "/workspace/demo.txt"])
+        removed_dir = await bash.exec(["rm", "-r", "/workspace/docs"])
+        ignored_missing = await bash.exec(["rm", "-f", "/workspace/missing.txt"])
+        exists_file = await bash.exists("/workspace/demo.txt")
+        exists_dir = await bash.exists("/workspace/docs")
+
+    assert removed_file.exit_code == 0
+    assert removed_dir.exit_code == 0
+    assert ignored_missing.exit_code == 0
+    assert exists_file is False
+    assert exists_dir is False
+
+
+@pytest.mark.anyio
+async def test_script_mode_rm_works_with_followup_listing() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/docs", parents=True)
+        await bash.write_file("/workspace/docs/readme.txt", "bert")
+        result = await bash.exec_script("rm /workspace/docs/readme.txt; ls /workspace/docs")
+
+    assert result.exit_code == 0
+    assert result.stdout == ""
+
+
+@pytest.mark.anyio
+async def test_argv_mode_cp_supports_multiple_files_and_recursive_dirs() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/src/docs", parents=True)
+        await bash.mkdir("/workspace/out", parents=True)
+        await bash.write_file("/workspace/src/demo.txt", "root")
+        await bash.write_file("/workspace/src/docs/readme.txt", "nested")
+        copied_file = await bash.exec(["cp", "/workspace/src/demo.txt", "/workspace/out"])
+        copied_dir = await bash.exec(["cp", "-r", "/workspace/src/docs", "/workspace/out"])
+        file_contents = await bash.read_file("/workspace/out/demo.txt")
+        dir_contents = await bash.read_file("/workspace/out/docs/readme.txt")
+
+    assert copied_file.exit_code == 0
+    assert copied_dir.exit_code == 0
+    assert file_contents == "root"
+    assert dir_contents == "nested"
+
+
+@pytest.mark.anyio
+async def test_script_mode_cp_works_with_followup_read() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/source.txt", "bert")
+        result = await bash.exec_script(
+            "cp /workspace/source.txt /workspace/copied.txt; cat /workspace/copied.txt"
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "bert"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_mv_supports_files_and_directories() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/src/docs", parents=True)
+        await bash.mkdir("/workspace/out", parents=True)
+        await bash.write_file("/workspace/src/demo.txt", "root")
+        await bash.write_file("/workspace/src/docs/readme.txt", "nested")
+        moved_file = await bash.exec(["mv", "/workspace/src/demo.txt", "/workspace/out"])
+        moved_dir = await bash.exec(["mv", "/workspace/src/docs", "/workspace/out"])
+        file_contents = await bash.read_file("/workspace/out/demo.txt")
+        dir_contents = await bash.read_file("/workspace/out/docs/readme.txt")
+        source_file_exists = await bash.exists("/workspace/src/demo.txt")
+        source_dir_exists = await bash.exists("/workspace/src/docs")
+
+    assert moved_file.exit_code == 0
+    assert moved_dir.exit_code == 0
+    assert file_contents == "root"
+    assert dir_contents == "nested"
+    assert source_file_exists is False
+    assert source_dir_exists is False
+
+
+@pytest.mark.anyio
+async def test_script_mode_mv_works_with_followup_listing() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/source.txt", "bert")
+        result = await bash.exec_script(
+            "mv /workspace/source.txt /workspace/moved.txt; ls /workspace | tail -n 1"
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "moved.txt\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_tee_supports_passthrough_and_append() -> None:
+    async with Bash() as bash:
+        first = await bash.exec(["tee", "/workspace/log.txt"], stdin="bert\n")
+        second = await bash.exec(["tee", "-a", "/workspace/log.txt"], stdin="ana\n")
+        contents = await bash.read_file("/workspace/log.txt")
+
+    assert first.stdout == "bert\n"
+    assert second.stdout == "ana\n"
+    assert contents == "bert\nana\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_tee_works_in_pipelines() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script("echo bert | tee /workspace/tee.txt | tr abc xyz")
+        contents = await bash.read_file("/workspace/tee.txt")
+
+    assert result.exit_code == 0
+    assert result.stdout == "yert\n"
+    assert contents == "bert\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_printf_supports_percent_s_and_percent_escape() -> None:
+    async with Bash() as bash:
+        rendered = await bash.exec(["printf", "%s\\n", "bert", "ana"])
+        literal = await bash.exec(["printf", "%% done\\n"])
+
+    assert rendered.stdout == "bert\nana\n"
+    assert literal.stdout == "% done\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_printf_works_in_pipelines() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script(
+            "printf '%s\\n' bert | tee /workspace/printf.txt | tail -n 1"
+        )
+        contents = await bash.read_file("/workspace/printf.txt")
+
+    assert result.exit_code == 0
+    assert result.stdout == "bert\n"
+    assert contents == "bert\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_seq_supports_default_and_explicit_steps() -> None:
+    async with Bash() as bash:
+        default = await bash.exec(["seq", "3"])
+        explicit = await bash.exec(["seq", "2", "2", "6"])
+
+    assert default.stdout == "1\n2\n3\n"
+    assert explicit.stdout == "2\n4\n6\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_seq_works_in_pipelines() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script("seq 1 4 | tail -n 1")
+
+    assert result.exit_code == 0
+    assert result.stdout == "4\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_date_supports_default_and_format_output() -> None:
+    async with Bash() as bash:
+        default = await bash.exec(["date"])
+        formatted = await bash.exec(["date", "+%F"])
+
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\n", default.stdout)
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}\n", formatted.stdout)
+
+
+@pytest.mark.anyio
+async def test_script_mode_date_works_in_pipelines() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script("date +%F | tail -n 1")
+
+    assert result.exit_code == 0
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}\n", result.stdout)
+
+
+@pytest.mark.anyio
+async def test_argv_mode_env_supports_clear_assign_and_exec() -> None:
+    async with Bash() as bash:
+        listed = await bash.exec(["env", "-i", "FOO=bar", "BAR=baz"])
+        executed = await bash.exec(["env", "-i", "FOO=bar", "printenv", "FOO", "BAR"])
+
+    assert listed.exit_code == 0
+    assert listed.stdout == "BAR=baz\nFOO=bar\n"
+    assert executed.exit_code == 0
+    assert executed.stdout == "bar\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_which_reports_found_and_missing() -> None:
+    async with Bash() as bash:
+        result = await bash.exec(["which", "echo", "rg", "missing"])
+
+    assert result.exit_code == 1
+    assert result.stdout == "echo\nrg\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_dirname_and_basename_support_multiple_paths() -> None:
+    async with Bash() as bash:
+        dirname_result = await bash.exec(["dirname", "/workspace/docs/readme.txt", "demo"])
+        basename_result = await bash.exec(["basename", "/workspace/docs/readme.txt", "demo/"])
+
+    assert dirname_result.stdout == "/workspace/docs\n.\n"
+    assert basename_result.stdout == "readme.txt\ndemo\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_rmdir_supports_parent_cleanup() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/demo/nested", parents=True)
+        result = await bash.exec(["rmdir", "-p", "/workspace/demo/nested"])
+
+        nested_exists = await bash.exists("/workspace/demo/nested")
+        parent_exists = await bash.exists("/workspace/demo")
+
+    assert result.exit_code == 0
+    assert nested_exists is False
+    assert parent_exists is False
+
+
+@pytest.mark.anyio
+async def test_argv_mode_comm_and_diff_compare_two_files() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/left.txt", "alpha\ncommon\n")
+        await bash.write_file("/workspace/right.txt", "beta\ncommon\n")
+        comm_result = await bash.exec(["comm", "-3", "/workspace/left.txt", "/workspace/right.txt"])
+        diff_result = await bash.exec(["diff", "/workspace/left.txt", "/workspace/right.txt"])
+
+    assert comm_result.exit_code == 0
+    assert comm_result.stdout == "alpha\n\tbeta\n"
+    assert diff_result.exit_code == 1
+    assert diff_result.stdout == (
+        "--- /workspace/left.txt\n+++ /workspace/right.txt\n@@\n-alpha\n+beta\n common\n"
+    )
+
+
+@pytest.mark.anyio
+async def test_script_mode_column_and_xargs_work_in_pipelines() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script(
+            "printf 'name role\\nbert eng\\n' | column -t | tail -n 1; "
+            "printf 'a b c' | xargs -n 2 echo"
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "bert  eng\na b\nc\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_rg_searches_files_and_stdin() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/search", parents=True)
+        await bash.write_file("/workspace/search/a.txt", "alpha\nbert\n")
+        await bash.write_file("/workspace/search/b.txt", "BERT\nbeta\n")
+
+        files = await bash.exec(["rg", "-n", "bert", "/workspace/search"])
+        listed = await bash.exec(["rg", "-l", "-i", "bert", "/workspace/search"])
+        piped = await bash.exec(["rg", "-n", "bert"], stdin="ana\nbert\n")
+
+    assert files.exit_code == 0
+    assert files.stdout == "/workspace/search/a.txt:2:bert\n"
+    assert listed.exit_code == 0
+    assert listed.stdout == "/workspace/search/a.txt\n/workspace/search/b.txt\n"
+    assert piped.exit_code == 0
+    assert piped.stdout == "2:bert\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_tree_stat_and_file_report_paths() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/demo/nested", parents=True)
+        await bash.write_file("/workspace/demo/nested/readme.txt", "hello")
+
+        tree_result = await bash.exec(["tree", "-L", "2", "/workspace/demo"])
+        stat_result = await bash.exec(["stat", "/workspace/demo/nested/readme.txt"])
+        file_result = await bash.exec(["file", "/workspace/demo/nested/readme.txt"])
+
+    assert tree_result.exit_code == 0
+    assert "/workspace/demo" in tree_result.stdout
+    assert "nested/" in tree_result.stdout
+    assert stat_result.stdout == (
+        "File: /workspace/demo/nested/readme.txt\nType: regular file\nSize: 5\n"
+    )
+    assert file_result.stdout == "/workspace/demo/nested/readme.txt: UTF-8 text\n"
+
+
+@pytest.mark.anyio
+async def test_host_readwrite_ln_and_readlink_work_for_workspace_paths(tmp_path: Path) -> None:
+    workspace = tmp_path / "links-workspace"
+    workspace.mkdir()
+    (workspace / "docs").mkdir()
+    (workspace / "docs" / "guide.txt").write_text("hello", encoding="utf-8")
+
+    async with Bash(
+        profile=ExecutionProfile.WORKSPACE,
+        filesystem_mode=FilesystemMode.HOST_READWRITE,
+        workspace_root=str(workspace),
+        writable_roots=["/workspace/docs"],
+    ) as bash:
+        linked = await bash.exec(
+            ["ln", "-s", "/workspace/docs/guide.txt", "/workspace/docs/guide-link.txt"]
+        )
+        readlink_result = await bash.exec(["readlink", "/workspace/docs/guide-link.txt"])
+        cat_result = await bash.exec(["cat", "/workspace/docs/guide-link.txt"])
+
+    assert linked.exit_code == 0
+    assert readlink_result.stdout == "/workspace/docs/guide.txt\n"
+    assert cat_result.stdout == "hello"
+
+
+@pytest.mark.anyio
+async def test_script_mode_rev_nl_tac_strings_fold_expand_and_unexpand_work() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script(
+            "printf 'abc\\ndef\\n' | tac | rev; "
+            "printf 'x\\ny\\n' | nl -ba; "
+            "printf 'bcdef\\n' | strings -n 3; "
+            "printf 'abcdef' | fold -w 3; "
+            "printf 'a\\tb\\n' | expand -t 4 | unexpand -a -t 4"
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "fed\ncba\n     1\tx\n     2\ty\nbcdef\nabc\ndef\na\tb\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_split_od_base64_and_hashes_work() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/input.txt", "one\ntwo\nthree\n")
+        split_result = await bash.exec(
+            ["split", "-l", "2", "/workspace/input.txt", "/workspace/chunk-"]
+        )
+        first_chunk = await bash.read_file("/workspace/chunk-aa")
+        second_chunk = await bash.read_file("/workspace/chunk-ab")
+        od_result = await bash.exec(["od", "-An", "-tx1", "/workspace/chunk-aa"])
+        encoded = await bash.exec(["base64", "/workspace/chunk-aa"])
+        decoded = await bash.exec(["base64", "-d"], stdin=encoded.stdout)
+        md5_result = await bash.exec(["md5sum", "/workspace/chunk-aa"])
+        sha1_result = await bash.exec(["sha1sum", "/workspace/chunk-aa"])
+        sha256_result = await bash.exec(["sha256sum", "/workspace/chunk-aa"])
+
+    assert split_result.exit_code == 0
+    assert first_chunk == "one\ntwo\n"
+    assert second_chunk == "three\n"
+    assert od_result.stdout == "6f 6e 65 0a 74 77 6f 0a\n"
+    assert decoded.stdout == "one\ntwo\n"
+    assert md5_result.stdout == "2094b601daac3d68f5aed51d3c20f7cd  /workspace/chunk-aa\n"
+    assert sha1_result.stdout == "c708d7ef841f7e1748436b8ef5670d0b2de1a227  /workspace/chunk-aa\n"
+    assert sha256_result.stdout == (
+        "c3f9c8c283a2b1f2f1896f27a01cbe3cddc0c9d93f752e4639035a0f5b36f6e8  /workspace/chunk-aa\n"
+    )
+
+
+@pytest.mark.anyio
+async def test_script_mode_detached_handle_buffers_events() -> None:
+    async with Bash() as bash:
+        run = await bash.exec_detached_script("echo detached; echo script")
+        result = await run.wait()
+
+    assert result.stdout == "detached\nscript\n"
+    assert [event.kind for event in run.events()] == [
+        "run_started",
+        "stdout",
+        "run_completed",
+    ]
+
+
+@pytest.mark.anyio
+async def test_script_mode_expands_request_env_variables() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script(
+            "echo $GREETING \"${TARGET}\" '$TARGET'",
+            env={"GREETING": "hello", "TARGET": "world"},
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "hello world $TARGET\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_supports_command_local_assignments() -> None:
+    async with Bash() as bash:
+        local = await bash.exec_script("FOO=hello BAR=${FOO}-world printenv FOO BAR")
+        leaked = await bash.exec_script("printenv FOO BAR")
+
+    assert local.exit_code == 0
+    assert local.stdout == "hello\nhello-world\n"
+    assert leaked.stdout == ""
+
+
+@pytest.mark.anyio
+async def test_script_mode_globbing_expands_matches() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/glob", parents=True)
+        await bash.write_file("/workspace/glob/a1.txt", "a1")
+        await bash.write_file("/workspace/glob/a2.txt", "a2")
+        await bash.write_file("/workspace/glob/b1.txt", "b1")
+        await bash.write_file("/workspace/glob/notes.md", "md")
+
+        result = await bash.exec_script(
+            "echo *.txt a?.txt [ab]1.txt",
+            cwd="/workspace/glob",
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "a1.txt a2.txt b1.txt a1.txt a2.txt a1.txt b1.txt\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_globbing_leaves_unmatched_patterns_literal() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/glob", parents=True)
+        await bash.write_file("/workspace/glob/demo.txt", "demo")
+        result = await bash.exec_script("echo *.png", cwd="/workspace/glob")
+
+    assert result.exit_code == 0
+    assert result.stdout == "*.png\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_globbing_works_with_env_expansion() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/glob", parents=True)
+        await bash.write_file("/workspace/glob/app.log", "app")
+        await bash.write_file("/workspace/glob/web.log", "web")
+        result = await bash.exec_script(
+            "echo $PATTERN",
+            cwd="/workspace/glob",
+            env={"PATTERN": "*.log"},
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "app.log web.log\n"
+
+
+@pytest.mark.anyio
+async def test_cooperative_cancellation() -> None:
+    async with Bash() as bash:
+        result_holder: dict[str, ExecutionResult] = {}
+
+        async def run_sleep() -> None:
+            result_holder["result"] = await bash.exec(["sleep", "0.25"], timeout_ms=1_000)
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(run_sleep)
+            await anyio.sleep(0.05)
+            bash.cancel()
+
+        result = result_holder["result"]
+
+    assert result.error is not None
+    assert result.error.kind is ErrorKind.CANCELLATION
+
+
+@pytest.mark.anyio
+async def test_exec_detached_returns_handle_and_waits_successfully() -> None:
+    async with Bash() as bash:
+        run = await bash.exec_detached(["echo", "hello", "detached"])
+        assert run.run_id.startswith("session-")
+        assert run.status() in {RunStatus.PENDING, RunStatus.RUNNING, RunStatus.COMPLETED}
+        result = await run.wait()
+
+    assert result.exit_code == 0
+    assert result.stdout == "hello detached\n"
+    assert run.status() is RunStatus.COMPLETED
+    assert run.stdout() == "hello detached\n"
+    assert run.output() == "hello detached\n"
+    assert [event.kind for event in run.events()] == [
+        "run_started",
+        "stdout",
+        "run_completed",
+    ]
+
+
+@pytest.mark.anyio
+async def test_detached_cancelled_run_has_stable_terminal_state() -> None:
+    async with Bash() as bash:
+        run = await bash.exec_detached(["sleep", "0.25"], timeout_ms=1_000)
+        await anyio.sleep(0.05)
+        run.cancel()
+        result = await run.wait()
+
+    assert result.error is not None
+    assert result.error.kind is ErrorKind.CANCELLATION
+    assert run.status() is RunStatus.CANCELLED
+    assert run.stdout() == ""
+    assert run.stderr()
+    assert [event.kind for event in run.events()] == [
+        "run_started",
+        "stderr",
+        "run_cancelled",
+    ]
+
+
+@pytest.mark.anyio
+async def test_active_run_blocks_second_exec_and_file_helpers() -> None:
+    async with Bash() as bash:
+        run = await bash.exec_detached(["sleep", "0.25"], timeout_ms=1_000)
+
+        with pytest.raises(ValueError):
+            await bash.exec_detached(["echo", "nope"])
+
+        with pytest.raises(ValueError):
+            await bash.exists("/workspace/demo.txt")
+
+        run.cancel()
+        await run.wait()
+
+
+@pytest.mark.anyio
+async def test_close_fails_while_active_run_exists() -> None:
+    async with Bash() as bash:
+        run = await bash.exec_detached(["sleep", "0.25"], timeout_ms=1_000)
+
+        with pytest.raises(ValueError):
+            await bash.close()
+
+        run.cancel()
+        await run.wait()
+
+
+@pytest.mark.anyio
+async def test_wait_remains_valid_after_session_closes_post_completion() -> None:
+    bash = Bash()
+    run = await bash.exec_detached(["echo", "after-close"])
+    first = await run.wait()
+    await bash.close()
+    second = await run.wait()
+
+    assert first.stdout == "after-close\n"
+    assert second.stdout == "after-close\n"
+
+
+@pytest.mark.anyio
+async def test_callbacks_receive_events_and_audits() -> None:
+    events: list[RunEvent] = []
+    audits: list[AuditEvent] = []
+    async with Bash(
+        event_callback=events.append,
+        audit_callback=audits.append,
+    ) as bash:
+        run = await bash.exec_detached(["echo", "callback-check"])
+        result = await run.wait()
+
+    assert result.exit_code == 0
+    assert any(audit.kind == "session_opened" for audit in audits)
+    assert any(audit.kind == "run_requested" for audit in audits)
+    assert [event.kind for event in events if event.run_id == run.run_id] == [
+        "run_started",
+        "stdout",
+        "run_completed",
+    ]
+
+
+@pytest.mark.anyio
+async def test_memory_file_helpers_and_shell_commands_share_state() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/demo", parents=True)
+        await bash.write_file("/workspace/demo/notes.txt", "hello")
+
+        exists = await bash.exists("/workspace/demo/notes.txt")
+        shell_result = await bash.exec(["cat", "/workspace/demo/notes.txt"])
+
+    assert exists is True
+    assert shell_result.stdout == "hello"
+
+
+@pytest.mark.anyio
+async def test_host_readonly_allows_reads_and_denies_writes(tmp_path: Path) -> None:
+    workspace = tmp_path / "readonly-workspace"
+    workspace.mkdir()
+    (workspace / "docs").mkdir()
+    (workspace / "docs" / "guide.txt").write_text("hello", encoding="utf-8")
+
+    async with Bash(
+        profile=ExecutionProfile.WORKSPACE,
+        filesystem_mode=FilesystemMode.HOST_READONLY,
+        workspace_root=str(workspace),
+    ) as bash:
+        contents = await bash.read_file("/workspace/docs/guide.txt")
+        with pytest.raises(ValueError):
+            await bash.write_file("/workspace/docs/guide.txt", "updated")
+
+    assert contents == "hello"
+    assert (workspace / "docs" / "guide.txt").read_text(encoding="utf-8") == "hello"
+
+
+@pytest.mark.anyio
+async def test_host_cow_preserves_host_files(tmp_path: Path) -> None:
+    workspace = tmp_path / "cow-workspace"
+    workspace.mkdir()
+    (workspace / "docs").mkdir()
+    (workspace / "docs" / "guide.txt").write_text("host", encoding="utf-8")
+
+    async with Bash(
+        profile=ExecutionProfile.WORKSPACE,
+        filesystem_mode=FilesystemMode.HOST_COW,
+        workspace_root=str(workspace),
+    ) as bash:
+        await bash.write_file("/workspace/docs/guide.txt", "overlay")
+        shell_result = await bash.exec(["cat", "/workspace/docs/guide.txt"])
+
+    assert shell_result.stdout == "overlay"
+    assert (workspace / "docs" / "guide.txt").read_text(encoding="utf-8") == "host"
+
+
+@pytest.mark.anyio
+async def test_host_readwrite_respects_writable_roots(tmp_path: Path) -> None:
+    workspace = tmp_path / "rw-workspace"
+    workspace.mkdir()
+    (workspace / "allowed").mkdir()
+    (workspace / "blocked").mkdir()
+
+    async with Bash(
+        profile=ExecutionProfile.WORKSPACE,
+        filesystem_mode=FilesystemMode.HOST_READWRITE,
+        workspace_root=str(workspace),
+        writable_roots=["/workspace/allowed"],
+    ) as bash:
+        await bash.write_file("/workspace/allowed/demo.txt", "ok")
+        with pytest.raises(ValueError):
+            await bash.write_file("/workspace/blocked/demo.txt", "nope")
+
+    assert (workspace / "allowed" / "demo.txt").read_text(encoding="utf-8") == "ok"
+    assert not (workspace / "blocked" / "demo.txt").exists()
+
+
+@pytest.mark.anyio
+async def test_memory_state_resets_after_reopen() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/reset", parents=True)
+        await bash.write_file("/workspace/reset/demo.txt", "hello")
+        assert await bash.exists("/workspace/reset/demo.txt")
+
+    async with Bash() as bash:
+        assert await bash.exists("/workspace/reset/demo.txt") is False
+
+
+@pytest.mark.anyio
+async def test_binary_file_helpers_preserve_content() -> None:
+    payload = b"\x00\xffhello\x10"
+
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/bin", parents=True)
+        await bash.write_file("/workspace/bin/blob.dat", payload, binary=True)
+        loaded = await bash.read_file("/workspace/bin/blob.dat", binary=True)
+
+    assert loaded == payload

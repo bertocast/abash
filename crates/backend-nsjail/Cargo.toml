@@ -1,0 +1,8 @@
+[package]
+name = "abash-backend-nsjail"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+abash-core = { path = "../core" }
+

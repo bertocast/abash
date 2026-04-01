@@ -1,0 +1,16 @@
+.DS_Store
+.hypothesis/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
+*.egg-info/
+*.pyc
+*.pyo
+*.so
+*.dylib
+*.dSYM/
+/build/
+/dist/
+/target/
