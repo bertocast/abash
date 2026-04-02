@@ -21,18 +21,17 @@ Recommended focus:
 
 - functions
 - `local`
-- loops: `for`, `while`, `until`
+- loops: `for`, `until`
 
 Recommended order:
 
-1. `while`
-2. `for`
-3. functions and `local`
-4. `until`
+1. `for`
+2. functions and `local`
+3. `until`
 
 Rationale:
 
-- `while` raises script usefulness faster than jumping straight to functions
+- `for` is the next smallest control-flow step after `while`
 - functions and `local` should come after loop/control-flow semantics are stable
 
 ## Execution Semantics
@@ -159,8 +158,7 @@ Recommended order:
 
 If the goal is to move closer to `just-bash` with high payoff and controlled scope:
 
-1. `while`
-2. `grep` depth
-3. hard links in `ln`
-4. execution-state decision
-5. custom command registration
+1. `grep` depth
+2. hard links in `ln`
+3. execution-state decision
+4. custom command registration

@@ -27,7 +27,7 @@
 - pipes (`|`): supported, buffered and sequential
 - redirects (`<`, `>`, `>>`, `2>`, `2>>`, `2>&1`): supported
 - command chaining (`;`, `&&`, `||`): supported
-- minimal `if` control flow (`if ...; then ...; fi`, `elif`, optional `else`): supported
+- minimal control flow (`if ...; then ...; fi`, `elif`, optional `else`, `while ...; do ...; done`): supported
 - command-local assignment prefixes (`FOO=bar cmd`): supported
 - `$NAME`, `${NAME}`, `${NAME:-default}`, `$1`, `$2`, `$@`, and `$#` expansion: supported in script mode
 - argument globbing with `*`, `?`, and bracket classes: supported in script mode

@@ -41,6 +41,7 @@ pub(crate) struct ScriptStep {
 pub(crate) enum StepKind {
     Pipeline(Pipeline),
     If(IfBlock),
+    While(WhileBlock),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +49,12 @@ pub(crate) struct IfBlock {
     pub condition: Pipeline,
     pub then_steps: Vec<ScriptStep>,
     pub else_steps: Vec<ScriptStep>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WhileBlock {
+    pub condition: Pipeline,
+    pub body_steps: Vec<ScriptStep>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -405,6 +412,9 @@ impl Parser {
         if self.consume_keyword("if") {
             return Ok(StepKind::If(self.parse_if_block()?));
         }
+        if self.consume_keyword("while") {
+            return Ok(StepKind::While(self.parse_while_block()?));
+        }
         Ok(StepKind::Pipeline(self.parse_pipeline()?))
     }
 
@@ -447,6 +457,24 @@ impl Parser {
             commands.push(self.parse_command()?);
         }
         Ok(Pipeline { commands })
+    }
+
+    fn parse_while_block(&mut self) -> Result<WhileBlock, SandboxError> {
+        let condition = self.parse_pipeline()?;
+        self.expect_clause_separator("do")?;
+        self.expect_keyword("do")?;
+        let body_steps = self.parse_steps_until(&["done"])?;
+        if body_steps.is_empty() {
+            return Err(SandboxError::InvalidRequest(
+                "while blocks require at least one command in the body".to_string(),
+            ));
+        }
+        self.expect_keyword("done")?;
+
+        Ok(WhileBlock {
+            condition,
+            body_steps,
+        })
     }
 
     fn parse_command(&mut self) -> Result<SimpleCommand, SandboxError> {
@@ -872,6 +900,16 @@ mod tests {
         assert_eq!(elif_block.then_steps.len(), 1);
         assert_eq!(elif_block.else_steps.len(), 1);
     }
+
+    #[test]
+    fn parses_while_do_done_blocks() {
+        let parsed = parse_script("while true; do echo tick; done").unwrap();
+        let StepKind::While(block) = &parsed[0].kind else {
+            panic!("expected while block");
+        };
+        assert_eq!(block.condition.commands.len(), 1);
+        assert_eq!(block.body_steps.len(), 1);
+    }
 }
 
 impl StepKind {
@@ -880,6 +918,7 @@ impl StepKind {
         match self {
             Self::Pipeline(pipeline) => pipeline,
             Self::If(_) => panic!("expected pipeline"),
+            Self::While(_) => panic!("expected pipeline"),
         }
     }
 }

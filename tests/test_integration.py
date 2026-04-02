@@ -220,6 +220,21 @@ async def test_script_mode_supports_if_elif_else_fi() -> None:
 
 
 @pytest.mark.anyio
+async def test_script_mode_supports_while_do_done() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/loop", parents=True)
+        await bash.write_file("/workspace/loop/run.txt", "run")
+        result = await bash.exec_script(
+            "while find /workspace/loop -name run.txt | grep run.txt; do echo tick; rm /workspace/loop/run.txt; done"
+        )
+        remaining = await bash.exists("/workspace/loop/run.txt")
+
+    assert result.exit_code == 0
+    assert result.stdout == "/workspace/loop/run.txt\ntick\n"
+    assert remaining is False
+
+
+@pytest.mark.anyio
 async def test_argv_mode_text_builtins_support_stdin_and_exit_codes() -> None:
     async with Bash() as bash:
         grep_hit = await bash.exec(["grep", "beta"], stdin="alpha\nbeta\n")

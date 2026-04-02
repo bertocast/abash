@@ -54,7 +54,7 @@ use abash_core::{
 };
 use script::{
     parse_script, ChainOp, IfBlock, Pipeline, RedirectSpec, ScriptStep, ScriptWord, SimpleCommand,
-    StepKind,
+    StepKind, WhileBlock,
 };
 use ureq::{http, Agent, RequestExt};
 use url::Url;
@@ -306,6 +306,18 @@ impl VirtualSession {
                     script_stdin,
                     state,
                 )?,
+                StepKind::While(block) => self.run_while_block(
+                    runtime,
+                    block,
+                    config,
+                    cancel_flag,
+                    timeout_ms,
+                    started,
+                    network_enabled,
+                    base_metadata,
+                    script_stdin,
+                    state,
+                )?,
             }
         }
 
@@ -390,6 +402,83 @@ impl VirtualSession {
             .clone()
             .or_else(|| Some(self.if_no_match_result(&runtime.cwd, base_metadata)));
         Ok(())
+    }
+
+    fn run_while_block(
+        &mut self,
+        runtime: &mut RuntimeState,
+        block: &WhileBlock,
+        config: &SandboxConfig,
+        cancel_flag: &AtomicBool,
+        timeout_ms: Option<u64>,
+        started: Instant,
+        network_enabled: bool,
+        base_metadata: &BTreeMap<String, String>,
+        script_stdin: &mut Option<Vec<u8>>,
+        state: &mut ScriptState,
+    ) -> Result<(), ExecutionResult> {
+        let mut ran_body = false;
+
+        loop {
+            let condition = self
+                .run_pipeline(
+                    runtime,
+                    &block.condition,
+                    config,
+                    cancel_flag,
+                    timeout_ms,
+                    started,
+                    network_enabled,
+                    base_metadata,
+                    script_stdin,
+                )
+                .map_err(|error| {
+                    let mut failed =
+                        ExecutionResult::failure(error, self.base_metadata(&runtime.cwd));
+                    failed.stdout = state.stdout.clone();
+                    failed.stderr = state.stderr.clone();
+                    failed
+                })?;
+            state.executed_steps += 1;
+            state.stdout.extend(&condition.stdout);
+            state.stderr.extend(&condition.stderr);
+
+            if condition.error.is_some() {
+                let mut failed = condition;
+                failed.stdout = state.stdout.clone();
+                failed.stderr = state.stderr.clone();
+                return Err(failed);
+            }
+
+            if condition.exit_code != 0 {
+                if !ran_body {
+                    state.last_result = Some(self.if_no_match_result(&runtime.cwd, base_metadata));
+                }
+                return Ok(());
+            }
+
+            ran_body = true;
+            let mut body_state = ScriptState::default();
+            if let Err(mut failed) = self.run_steps(
+                runtime,
+                &block.body_steps,
+                config,
+                cancel_flag,
+                timeout_ms,
+                started,
+                network_enabled,
+                base_metadata,
+                script_stdin,
+                &mut body_state,
+            ) {
+                state.merge(body_state);
+                failed.stdout = state.stdout.clone();
+                failed.stderr = state.stderr.clone();
+                return Err(failed);
+            }
+
+            state.merge(body_state);
+        }
     }
 
     fn run_pipeline(
