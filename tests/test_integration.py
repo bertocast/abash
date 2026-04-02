@@ -1331,6 +1331,18 @@ async def test_script_mode_expands_request_env_variables() -> None:
 
 
 @pytest.mark.anyio
+async def test_script_mode_expands_default_variables() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script(
+            "echo ${SET:-fallback} ${EMPTY:-fallback} ${MISSING:-$SET} ${MISSING:-literal}",
+            env={"SET": "hello", "EMPTY": ""},
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "hello fallback hello literal\n"
+
+
+@pytest.mark.anyio
 async def test_script_mode_supports_command_local_assignments() -> None:
     async with Bash() as bash:
         local = await bash.exec_script("FOO=hello BAR=${FOO}-world printenv FOO BAR")

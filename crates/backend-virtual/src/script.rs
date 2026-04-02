@@ -597,10 +597,10 @@ fn expand_part(part: &str, env: &BTreeMap<String, String>) -> Result<String, San
         }
 
         if chars[index + 1] == '{' {
-            let mut name = String::new();
+            let mut expression = String::new();
             index += 2;
             while index < chars.len() && chars[index] != '}' {
-                name.push(chars[index]);
+                expression.push(chars[index]);
                 index += 1;
             }
             if index >= chars.len() || chars[index] != '}' {
@@ -608,12 +608,25 @@ fn expand_part(part: &str, env: &BTreeMap<String, String>) -> Result<String, San
                     "unterminated ${...} variable expansion in script".to_string(),
                 ));
             }
-            if !is_valid_assignment_name(&name) {
+
+            let (name, default_value) = match expression.split_once(":-") {
+                Some((name, default)) => (name, Some(default)),
+                None => (expression.as_str(), None),
+            };
+            if !is_valid_assignment_name(name) {
                 return Err(SandboxError::InvalidRequest(format!(
                     "invalid variable name in expansion: {name}"
                 )));
             }
-            output.push_str(env.get(&name).map(String::as_str).unwrap_or(""));
+
+            match env.get(name) {
+                Some(value) if !value.is_empty() => output.push_str(value),
+                _ => {
+                    if let Some(default) = default_value {
+                        output.push_str(&expand_part(default, env)?);
+                    }
+                }
+            }
             index += 1;
             continue;
         }
@@ -722,6 +735,28 @@ mod tests {
             .map(|part| part.expand(&env).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(values, vec!["$NAME", "demo", "demo"]);
+    }
+
+    #[test]
+    fn expansion_supports_default_values() {
+        let env = BTreeMap::from([
+            (String::from("SET"), String::from("value")),
+            (String::from("EMPTY"), String::new()),
+            (String::from("FALLBACK"), String::from("fallback")),
+        ]);
+
+        assert_eq!(
+            expand_part("${SET:-default}", &env).unwrap(),
+            "value".to_string()
+        );
+        assert_eq!(
+            expand_part("${EMPTY:-default}", &env).unwrap(),
+            "default".to_string()
+        );
+        assert_eq!(
+            expand_part("${MISSING:-$FALLBACK}", &env).unwrap(),
+            "fallback".to_string()
+        );
     }
 
     #[test]

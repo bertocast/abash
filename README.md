@@ -90,7 +90,7 @@ Command-name parity work is tracked in [docs/pending_commands.md](docs/pending_c
 ## Script Compatibility
 
 - Script mode is intentionally partial, not bash-complete.
-- Supported today: simple commands, quoting, comments, `|`, `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, `;`, `&&`, `||`, `if ...; then ...; fi`, `if ...; then ...; else ...; fi`, command-local assignment prefixes, `$NAME`, `${NAME}` expansion, and argument globbing with `*`, `?`, and bracket classes.
+- Supported today: simple commands, quoting, comments, `|`, `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, `;`, `&&`, `||`, `if ...; then ...; fi`, `if ...; then ...; else ...; fi`, command-local assignment prefixes, `$NAME`, `${NAME}`, `${NAME:-default}` expansion, and argument globbing with `*`, `?`, and bracket classes.
 - Pipeline execution is buffered and sequential inside the virtual backend; it is not a streaming process graph.
 - Variable expansion applies only in script mode, only for explicit request env plus command-local assignments, and does not expose host env.
 - Globbing currently applies only to expanded script arguments; command names and redirection targets stay literal.
