@@ -44,6 +44,10 @@ where
             stdout: render_csv_output(result.stdout)?,
             exit_code: result.exit_code,
         }),
+        Format::Ini => Ok(jq::Execution {
+            stdout: render_ini_output(result.stdout)?,
+            exit_code: result.exit_code,
+        }),
     }
 }
 
@@ -53,6 +57,7 @@ enum Format {
     Json,
     Toml,
     Csv,
+    Ini,
 }
 
 struct Invocation {
@@ -64,6 +69,7 @@ struct Invocation {
     exit_status: bool,
     slurp: bool,
     null_input: bool,
+    front_matter: bool,
     filter: String,
     paths: Vec<String>,
 }
@@ -77,6 +83,7 @@ fn parse_invocation(args: &[String]) -> Result<Invocation, SandboxError> {
     let mut exit_status = false;
     let mut slurp = false;
     let mut null_input = false;
+    let mut front_matter = false;
     let mut index = 0usize;
 
     while let Some(flag) = args.get(index) {
@@ -114,6 +121,7 @@ fn parse_invocation(args: &[String]) -> Result<Invocation, SandboxError> {
             "-e" | "--exit-status" => exit_status = true,
             "-s" | "--slurp" => slurp = true,
             "-n" | "--null-input" => null_input = true,
+            "-f" | "--front-matter" => front_matter = true,
             "-" => break,
             value if value.starts_with("--") => {
                 return Err(SandboxError::InvalidRequest(format!(
@@ -128,6 +136,7 @@ fn parse_invocation(args: &[String]) -> Result<Invocation, SandboxError> {
                         'e' => exit_status = true,
                         's' => slurp = true,
                         'n' => null_input = true,
+                        'f' => front_matter = true,
                         other => {
                             return Err(SandboxError::InvalidRequest(format!(
                                 "yq flag is not supported: -{other}"
@@ -156,6 +165,7 @@ fn parse_invocation(args: &[String]) -> Result<Invocation, SandboxError> {
         exit_status,
         slurp,
         null_input,
+        front_matter,
         filter: filter.clone(),
         paths: args[index + 1..].to_vec(),
     })
@@ -167,6 +177,7 @@ fn parse_format(value: &str) -> Result<Format, SandboxError> {
         "json" => Ok(Format::Json),
         "toml" => Ok(Format::Toml),
         "csv" | "tsv" => Ok(Format::Csv),
+        "ini" => Ok(Format::Ini),
         other => Err(SandboxError::InvalidRequest(format!(
             "yq format is not supported: {other}"
         ))),
@@ -204,7 +215,7 @@ where
 {
     let mut output = Vec::new();
     if spec.paths.is_empty() {
-        append_source_values(&mut output, &stdin, spec.input_format)?;
+        append_source_values(&mut output, &stdin, spec.input_format, spec.front_matter)?;
         return Ok(output);
     }
 
@@ -215,7 +226,7 @@ where
             read_file(path)?
         };
         let format = effective_input_format(spec, path);
-        append_source_values(&mut output, &bytes, format)?;
+        append_source_values(&mut output, &bytes, format, spec.front_matter)?;
     }
     Ok(output)
 }
@@ -230,6 +241,7 @@ fn effective_input_format(spec: &Invocation, path: &str) -> Format {
             "json" => return Format::Json,
             "toml" => return Format::Toml,
             "csv" | "tsv" => return Format::Csv,
+            "ini" => return Format::Ini,
             "yaml" | "yml" => return Format::Yaml,
             _ => {}
         }
@@ -242,7 +254,14 @@ fn append_source_values(
     output: &mut Vec<u8>,
     bytes: &[u8],
     format: Format,
+    front_matter: bool,
 ) -> Result<(), SandboxError> {
+    if front_matter {
+        let text = decode_utf8(bytes, "yq currently requires UTF-8 front-matter input")?;
+        append_json_value(output, &extract_front_matter(text)?)?;
+        return Ok(());
+    }
+
     match format {
         Format::Json => output.extend_from_slice(bytes),
         Format::Yaml => {
@@ -264,6 +283,10 @@ fn append_source_values(
         Format::Csv => {
             let text = decode_utf8(bytes, "yq currently requires UTF-8 CSV input")?;
             append_json_value(output, &csv_to_json(text)?)?;
+        }
+        Format::Ini => {
+            let text = decode_utf8(bytes, "yq currently requires UTF-8 INI input")?;
+            append_json_value(output, &ini_to_json(text)?)?;
         }
     }
     Ok(())
@@ -324,6 +347,15 @@ fn render_csv_output(stdout: Vec<u8>) -> Result<Vec<u8>, SandboxError> {
     Ok(format_csv(&csv_rows_from_json(&root)?).into_bytes())
 }
 
+fn render_ini_output(stdout: Vec<u8>) -> Result<Vec<u8>, SandboxError> {
+    let values = parse_json_output(stdout)?;
+    let mut rendered = String::new();
+    for value in &values {
+        rendered.push_str(&render_ini_value(value)?);
+    }
+    Ok(rendered.into_bytes())
+}
+
 fn parse_json_output(stdout: Vec<u8>) -> Result<Vec<Value>, SandboxError> {
     let text = String::from_utf8(stdout).map_err(|_| {
         SandboxError::BackendFailure("yq could not decode intermediate JSON output".to_string())
@@ -356,6 +388,146 @@ fn render_yaml_value(value: &Value) -> Result<String, SandboxError> {
                 rendered.push('\n');
             }
             rendered
+        }
+    })
+}
+
+fn extract_front_matter(input: &str) -> Result<Value, SandboxError> {
+    let trimmed = input.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("---") {
+        if let Some(end) = rest.find("\n---") {
+            let yaml = &rest[..end];
+            let value = serde_norway::from_str::<Value>(yaml).map_err(|error| {
+                SandboxError::InvalidRequest(format!(
+                    "yq could not parse YAML front-matter: {error}"
+                ))
+            })?;
+            return Ok(value);
+        }
+    }
+    if let Some(rest) = trimmed.strip_prefix("+++") {
+        if let Some(end) = rest.find("\n+++") {
+            let toml = &rest[..end];
+            let value = toml::from_str::<TomlValue>(toml).map_err(|error| {
+                SandboxError::InvalidRequest(format!(
+                    "yq could not parse TOML front-matter: {error}"
+                ))
+            })?;
+            return Ok(toml_to_json(&value));
+        }
+    }
+    Err(SandboxError::InvalidRequest(
+        "yq: no front-matter found".to_string(),
+    ))
+}
+
+fn ini_to_json(input: &str) -> Result<Value, SandboxError> {
+    let mut root = Map::new();
+    let mut current_section = None::<String>;
+
+    for raw_line in input.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') && line.len() >= 3 {
+            current_section = Some(line[1..line.len() - 1].trim().to_string());
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(SandboxError::InvalidRequest(format!(
+                "yq could not parse INI input: malformed line `{line}`"
+            )));
+        };
+        let key = key.trim().to_string();
+        let value = ini_scalar_to_json(value.trim());
+        if let Some(section) = &current_section {
+            let entry = root
+                .entry(section.clone())
+                .or_insert_with(|| Value::Object(Map::new()));
+            let Value::Object(map) = entry else {
+                return Err(SandboxError::InvalidRequest(
+                    "yq could not parse INI input: section collision".to_string(),
+                ));
+            };
+            map.insert(key, value);
+        } else {
+            root.insert(key, value);
+        }
+    }
+
+    Ok(Value::Object(root))
+}
+
+fn ini_scalar_to_json(value: &str) -> Value {
+    if value.eq_ignore_ascii_case("true") {
+        Value::Bool(true)
+    } else if value.eq_ignore_ascii_case("false") {
+        Value::Bool(false)
+    } else if let Ok(number) = value.parse::<i64>() {
+        Value::Number(number.into())
+    } else if let Ok(number) = value.parse::<f64>() {
+        Number::from_f64(number)
+            .map(Value::Number)
+            .unwrap_or_else(|| Value::String(value.to_string()))
+    } else {
+        Value::String(value.to_string())
+    }
+}
+
+fn render_ini_value(value: &Value) -> Result<String, SandboxError> {
+    let Value::Object(object) = value else {
+        return Err(SandboxError::InvalidRequest(
+            "yq can only render objects as INI".to_string(),
+        ));
+    };
+
+    let mut rendered = String::new();
+    let mut sections = Vec::new();
+    for (key, value) in object {
+        match value {
+            Value::Object(_) => sections.push((key, value)),
+            _ => {
+                rendered.push_str(key);
+                rendered.push('=');
+                rendered.push_str(&ini_scalar_string(value)?);
+                rendered.push('\n');
+            }
+        }
+    }
+    if !sections.is_empty() && !rendered.is_empty() {
+        rendered.push('\n');
+    }
+    for (index, (name, value)) in sections.into_iter().enumerate() {
+        if index > 0 {
+            rendered.push('\n');
+        }
+        rendered.push('[');
+        rendered.push_str(name);
+        rendered.push_str("]\n");
+        let Value::Object(map) = value else {
+            unreachable!()
+        };
+        for (key, value) in map {
+            rendered.push_str(key);
+            rendered.push('=');
+            rendered.push_str(&ini_scalar_string(value)?);
+            rendered.push('\n');
+        }
+    }
+    Ok(rendered)
+}
+
+fn ini_scalar_string(value: &Value) -> Result<String, SandboxError> {
+    Ok(match value {
+        Value::Null => String::new(),
+        Value::Bool(flag) => flag.to_string(),
+        Value::Number(number) => number.to_string(),
+        Value::String(text) => text.clone(),
+        _ => {
+            return Err(SandboxError::InvalidRequest(
+                "yq can only render scalar INI values".to_string(),
+            ))
         }
     })
 }
@@ -627,7 +799,7 @@ mod tests {
             "toml".to_string(),
             "-o".to_string(),
             "csv".to_string(),
-            "-rce".to_string(),
+            "-rfce".to_string(),
             ".name".to_string(),
         ])
         .unwrap();
@@ -635,6 +807,7 @@ mod tests {
         assert_eq!(spec.input_format, Format::Toml);
         assert_eq!(spec.output_format, Format::Csv);
         assert!(spec.raw_output);
+        assert!(spec.front_matter);
         assert!(spec.compact_output);
         assert!(spec.exit_status);
     }
@@ -642,7 +815,13 @@ mod tests {
     #[test]
     fn transcodes_yaml_documents_to_json_stream() {
         let mut output = Vec::new();
-        append_source_values(&mut output, b"name: bert\n---\nname: ana\n", Format::Yaml).unwrap();
+        append_source_values(
+            &mut output,
+            b"name: bert\n---\nname: ana\n",
+            Format::Yaml,
+            false,
+        )
+        .unwrap();
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("{\"name\":\"bert\"}"));
         assert!(text.contains("{\"name\":\"ana\"}"));
@@ -655,6 +834,7 @@ mod tests {
             &mut toml_output,
             b"[package]\nname = \"abash\"\nversion = \"0.1.0\"\n",
             Format::Toml,
+            false,
         )
         .unwrap();
         assert!(String::from_utf8(toml_output)
@@ -662,10 +842,26 @@ mod tests {
             .contains("\"package\""));
 
         let mut csv_output = Vec::new();
-        append_source_values(&mut csv_output, b"name,age\nbert,34\n", Format::Csv).unwrap();
+        append_source_values(&mut csv_output, b"name,age\nbert,34\n", Format::Csv, false).unwrap();
         assert_eq!(
             String::from_utf8(csv_output).unwrap(),
             "[{\"age\":34,\"name\":\"bert\"}]\n"
+        );
+    }
+
+    #[test]
+    fn parses_ini_and_front_matter() {
+        assert_eq!(
+            ini_to_json("name=abash\n[server]\nport=8080\n")
+                .unwrap()
+                .to_string(),
+            r#"{"name":"abash","server":{"port":8080}}"#
+        );
+        assert_eq!(
+            extract_front_matter("---\ntitle: hi\n---\nbody\n")
+                .unwrap()
+                .to_string(),
+            r#"{"title":"hi"}"#
         );
     }
 

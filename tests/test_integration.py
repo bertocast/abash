@@ -665,6 +665,41 @@ async def test_argv_mode_yq_supports_csv_input_and_output() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_yq_supports_ini_input_and_output() -> None:
+    async with Bash() as bash:
+        await bash.write_file(
+            "/workspace/config.ini",
+            "name=abash\n[server]\nport=8080\ndebug=true\n",
+        )
+        port = await bash.exec(["yq", "-p", "ini", ".server.port", "/workspace/config.ini"])
+        rendered = await bash.exec(
+            ["yq", "-p", "json", "-o", "ini", "."],
+            stdin='{"name":"abash","server":{"port":8080,"debug":true}}\n',
+        )
+
+    assert port.exit_code == 0
+    assert port.stdout == "8080\n"
+    assert rendered.stdout == "name=abash\n\n[server]\ndebug=true\nport=8080\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_yq_supports_front_matter_extraction() -> None:
+    async with Bash() as bash:
+        await bash.write_file(
+            "/workspace/post.md",
+            "---\ntitle: Roadmap\ncount: 2\n---\n# body\n",
+        )
+        title = await bash.exec(["yq", "--front-matter", ".title", "/workspace/post.md"])
+        count = await bash.exec(
+            ["yq", "--front-matter", "-o", "json", "-c", ".count", "/workspace/post.md"]
+        )
+
+    assert title.exit_code == 0
+    assert title.stdout == "Roadmap\n"
+    assert count.stdout == "2\n"
+
+
+@pytest.mark.anyio
 async def test_script_mode_yq_works_in_pipelines_without_globbing_filter() -> None:
     async with Bash() as bash:
         await bash.write_file(
