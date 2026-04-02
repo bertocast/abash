@@ -48,6 +48,11 @@ enum AwkStmt {
         op: AssignOp,
         expr: AwkExpr,
     },
+    Delete {
+        name: String,
+        key: AwkExpr,
+    },
+    Next,
 }
 
 enum AssignTarget {
@@ -352,6 +357,17 @@ fn parse_action_block(source: &str) -> Result<Vec<AwkStmt>, SandboxError> {
 
 fn parse_stmt(source: &str) -> Result<AwkStmt, SandboxError> {
     let source = source.trim();
+    if source == "next" {
+        return Ok(AwkStmt::Next);
+    }
+    if let Some(target) = source.strip_prefix("delete ") {
+        return match parse_assign_target(target.trim())? {
+            AssignTarget::Array { name, key } => Ok(AwkStmt::Delete { name, key }),
+            AssignTarget::Scalar(name) => Err(SandboxError::InvalidRequest(format!(
+                "awk delete requires an array target: {name}"
+            ))),
+        };
+    }
     if let Some(remainder) = source.strip_prefix("printf") {
         let exprs = parse_print_exprs(remainder.trim())?;
         if exprs.is_empty() {
@@ -853,7 +869,12 @@ fn run_program(
                 fnr,
                 filename: &input.filename,
             };
-            execute_rules(program, RuleKindMatcher::Main, Some(&record), &mut state)?;
+            if matches!(
+                execute_rules(program, RuleKindMatcher::Main, Some(&record), &mut state)?,
+                StmtSignal::NextRecord
+            ) {
+                continue;
+            }
         }
     }
 
@@ -885,12 +906,17 @@ enum RuleKindMatcher {
     End,
 }
 
+enum StmtSignal {
+    Continue,
+    NextRecord,
+}
+
 fn execute_rules(
     program: &AwkProgram,
     target: RuleKindMatcher,
     record: Option<&AwkRecord<'_>>,
     state: &mut RuntimeState,
-) -> Result<(), SandboxError> {
+) -> Result<StmtSignal, SandboxError> {
     for rule in &program.rules {
         let matches = match (&target, &rule.kind) {
             (RuleKindMatcher::Begin, RuleKind::Begin) => true,
@@ -903,11 +929,13 @@ fn execute_rules(
         };
         if matches {
             for stmt in &rule.actions {
-                execute_stmt(stmt, record, state)?;
+                if matches!(execute_stmt(stmt, record, state)?, StmtSignal::NextRecord) {
+                    return Ok(StmtSignal::NextRecord);
+                }
             }
         }
     }
-    Ok(())
+    Ok(StmtSignal::Continue)
 }
 
 fn split_fields(line: &str, delimiter: Option<char>) -> Vec<&str> {
@@ -921,7 +949,7 @@ fn execute_stmt(
     stmt: &AwkStmt,
     record: Option<&AwkRecord<'_>>,
     state: &mut RuntimeState,
-) -> Result<(), SandboxError> {
+) -> Result<StmtSignal, SandboxError> {
     match stmt {
         AwkStmt::Print(exprs) => {
             let mut rendered = Vec::new();
@@ -930,9 +958,11 @@ fn execute_stmt(
             }
             state.output.push_str(&rendered.join(" "));
             state.output.push('\n');
+            Ok(StmtSignal::Continue)
         }
         AwkStmt::Printf(exprs) => {
             state.output.push_str(&render_printf(exprs, record, state)?);
+            Ok(StmtSignal::Continue)
         }
         AwkStmt::Assign { target, op, expr } => {
             let right = eval_expr(expr, record, state)?;
@@ -952,9 +982,24 @@ fn execute_stmt(
                         .insert(key, next);
                 }
             }
+            Ok(StmtSignal::Continue)
+        }
+        AwkStmt::Delete { name, key } => {
+            let key = eval_expr(key, record, state)?.to_string_value();
+            if let Some(items) = state.arrays.get_mut(name) {
+                items.remove(&key);
+            }
+            Ok(StmtSignal::Continue)
+        }
+        AwkStmt::Next => {
+            if record.is_none() {
+                return Err(SandboxError::InvalidRequest(
+                    "awk next requires an input record".to_string(),
+                ));
+            }
+            Ok(StmtSignal::NextRecord)
         }
     }
-    Ok(())
 }
 
 fn apply_assignment(current: Option<&AwkValue>, op: AssignOp, right: AwkValue) -> AwkValue {
@@ -1305,5 +1350,20 @@ mod tests {
 
         let output = run_program(&program, &BTreeMap::new(), Some(','), &inputs).unwrap();
         assert_eq!(output, "6 9\n");
+    }
+
+    #[test]
+    fn supports_next_and_delete() {
+        let program = parse_program(
+            r#"{ seen[$1] = $2; ifskip[$1] = $2 } $2 == "skip" { delete seen[$1]; next } END { print seen["bert"], seen["ana"] }"#,
+        )
+        .unwrap();
+        let inputs = vec![AwkInput {
+            filename: "/workspace/data.csv".to_string(),
+            text: "bert,keep\nana,skip\n".to_string(),
+        }];
+
+        let output = run_program(&program, &BTreeMap::new(), Some(','), &inputs).unwrap();
+        assert_eq!(output, "keep \n");
     }
 }

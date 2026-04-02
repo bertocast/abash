@@ -550,6 +550,24 @@ async def test_argv_mode_awk_supports_array_accumulators() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_awk_supports_next_and_delete() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/people.csv", "bert,keep\nana,skip\n")
+        result = await bash.exec(
+            [
+                "awk",
+                "-F",
+                ",",
+                '{ seen[$1] = $2 } $2 == "skip" { delete seen[$1]; next } END { print seen["bert"], seen["ana"] }',
+                "/workspace/people.csv",
+            ]
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "keep \n"
+
+
+@pytest.mark.anyio
 async def test_argv_mode_jq_supports_paths_slices_and_raw_output() -> None:
     async with Bash() as bash:
         result = await bash.exec(
