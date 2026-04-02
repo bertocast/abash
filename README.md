@@ -54,7 +54,7 @@ Implemented today on the virtual backend:
 Most commands are intentionally partial implementations. `abash` aims for safe, useful workflows first, not full GNU/bash parity.
 Recent behavior lifts: `grep` now supports regex search plus narrow `-E`, `-F`, `-i`, `-n`, `-v`, `-c`, `-l`, and `-r`; `ln` now creates hard links by default and still supports `-s` for symlinks; `jq` now supports literals, binary ops, `select`, `map`, `length`, `type`, `keys`, `has`, array/object construction, and direct path assignment; `yq` now carries that jq-lite surface across YAML/JSON/TOML/CSV/INI/XML, plus front-matter extraction and broader `-i` rewrites that preserve source format across multiple files; `xan` now covers row/column operations like `head`, `tail`, `slice`, `reverse`, `behead`, `cat`, `drop`, `rename`, `enum`, `dedup`, `top`, `frequency`, `stats`, `agg`, and narrow `groupby`; `awk` now supports `BEGIN`/`END`, `-v`, variables, scalar and array assignments, statement-level `if/else`, `delete`, `next`, arithmetic, regex literals, `printf`, and basic comparisons.
 
-Command-name parity work is tracked in [docs/pending_commands.md](docs/pending_commands.md). Broader follow-up work is tracked in [docs/roadmap.md](docs/roadmap.md).
+Command-name parity history is tracked in [docs/pending_commands.md](docs/pending_commands.md). The closed comparison pass and its final decisions are tracked in [docs/roadmap.md](docs/roadmap.md).
 
 ## Filesystem Modes
 
@@ -109,7 +109,7 @@ Command-name parity work is tracked in [docs/pending_commands.md](docs/pending_c
 
 ## Current Limitations
 
-- multi-mount filesystem composition is deferred
+- multi-mount filesystem composition is not part of the current product line
 - unrestricted network access remains unavailable by design
 - detached runs are in-process only and do not survive interpreter or process restart
 - output and event retrieval are buffered snapshots, not live streaming logs

@@ -27,5 +27,5 @@ Published `just-bash` command-name parity is complete in `abash`.
 
 ## Notes
 
-- command-name parity is complete; remaining work is command behavior, shell language, filesystem/runtime behavior, and extension surface
-- see [docs/roadmap.md](docs/roadmap.md) for the comparison-based implementation plan
+- command-name parity is complete
+- the comparison-based parity pass is also complete; see [docs/roadmap.md](/Users/alberto/repos/abash/docs/roadmap.md) for the final decisions from that work

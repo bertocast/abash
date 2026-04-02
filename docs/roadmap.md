@@ -2,145 +2,68 @@
 
 Comparison baseline: `just-bash` from Vercel Labs.
 
-This document turns the remaining comparison work into implementation tracks. Command-name parity is complete; the larger body of work now sits in shell language, command behavior, runtime behavior, and extension surface.
+This parity pass is complete. There are no active roadmap items left from the current `just-bash` comparison run.
 
 ## Command Surface
 
-Published command-name parity with the `just-bash` README is complete.
+Status: complete.
 
-Recommended focus:
-
-1. keep the command list in sync as upstream adds or removes names
-2. spend implementation time on behavior depth instead of more names
+- published command-name parity with the `just-bash` README is landed
+- future command additions, if any, should follow upstream changes or concrete workflow demand rather than this parity plan
 
 ## Shell Language
 
-`abash` now covers simple commands, chaining, pipes, redirections, basic variable expansion, globbing, `if` / `elif`, `while`, `until`, `for`, and narrow `name() { ... }` functions with `local`.
+Status: complete for the intended narrow shell layer.
 
-Status:
-
-- `for`: landed
-- functions and `local`: landed in a narrow script-only form
-- `until`: landed
-- broader shell constructs such as `case`, `return`, `break`, and `continue` remain intentionally out of scope for now and are tracked as compatibility notes instead of active roadmap items
-
-Next focus: no active shell-language roadmap items.
+- simple commands, pipes, chaining, redirects, globbing, and variable expansion are landed
+- `if` / `elif`, `while`, `until`, `for`, and narrow `name() { ... }` functions with `local` are landed
+- larger shell constructs such as `case`, `return`, `break`, and `continue` remain explicit compatibility limits rather than active roadmap work
 
 ## Execution Semantics
 
-`just-bash` resets shell state on every `exec()` call while keeping the filesystem shared.
+Status: decided.
 
-`abash` currently persists selected session state across calls:
-
-- working directory
-- exported environment
-- history
-- aliases
-
-This is a meaningful behavioral difference. It is not automatically wrong, but it should become an explicit product choice rather than accidental drift.
-
-Current state:
-
-1. default session-persistent semantics remain in place
-2. opt-in `session_state="per_exec"` now provides a `just-bash`-style reset mode
-
-Recommended next step:
-
-- decide whether the long-term default should stay persistent or move closer to per-exec reset semantics before deepening functions and local-variable semantics
+- default behavior stays session-persistent
+- `session_state="per_exec"` remains the opt-in reset mode for closer `just-bash` behavior
+- filesystem persistence stays shared across both modes
 
 ## Command Behavior
 
-Many commands now exist by name in both projects, but `just-bash` is still broader in behavior.
+Status: complete for the current parity target.
 
-Highest-priority work:
-
-- `awk`: deeper control-flow/runtime surface beyond the current regex/`printf` plus array/`if`/`next` core
-- `xan`: later reshape/data-conversion subcommands beyond the current reshape plus `frequency`/`stats`/`agg`/`groupby` slice
-- `yq`: broader editing behavior beyond the current multi-file format-preserving `-i` core
-
-Recommended order:
-
-1. `awk`
-2. `xan`
-3. `yq`
-
-Rationale:
-
-- `grep`, `ln`, execution reset-mode, a broader `jq` slice with direct path assignment, YAML/JSON/TOML/CSV/INI/XML/front-matter `yq`, a broader `yq -i` with multi-file format-preserving rewrites, a second `xan` row-shaping wave (`behead`, `cat`, `dedup`, `top`), a third `xan` aggregation wave (`frequency`, `stats`, narrow `agg`, then narrow `groupby`), and four `awk` lifts (`regex`/`printf`, associative-array reads and writes, `delete`/`next`, then statement-level `if/else`) are landed
-- `jq` and `yq` affect high-value agent data workflows
-- `awk` now has the clearest remaining behavior payoff via array iteration or broader control flow, while `xan` shifts to later reshape/data-conversion work and `yq` stays on broader function/edit behavior
+- `jq`, `yq`, `xan`, `awk`, `grep`, `ln`, and the broader text/file toolkit were expanded to the planned narrow-but-useful surface
+- remaining behavioral differences are documented in [`docs/compatibility.md`](/Users/alberto/repos/abash/docs/compatibility.md) and [`docs/known-limitations.md`](/Users/alberto/repos/abash/docs/known-limitations.md), not tracked as active roadmap work
 
 ## JavaScript Runtime
 
-`just-bash` uses a QuickJS/WASM sandbox for `js-exec`.
+Status: decided.
 
-`abash` currently uses host Node.js with path and filesystem shims.
-
-This is both a behavior difference and a trust-model difference.
-
-Workstream options:
-
-1. keep host-Node execution and document it as an intentional runtime choice
-2. add a more isolated embedded JavaScript runtime
-3. support both modes behind configuration
-
-Recommended next step:
-
-- decide whether `abash` wants host-runtime pragmatism or closer runtime isolation semantics
+- `js-exec` intentionally uses host Node.js with workspace shims
+- closer QuickJS/WASM-style isolation is not an active roadmap item in this pass
 
 ## Filesystem Model
 
-`just-bash` exposes a wider filesystem story:
+Status: decided.
 
-- multi-mount composition
-- lazy file providers
-- direct compatibility-oriented filesystem adapters
-- hard links in `ln`
-
-`abash` still centers on one `/workspace` mount and only supports narrow symlink creation.
-
-Recommended order:
-
-1. multi-mount filesystem composition
-2. lazy file providers
-
-Rationale:
-
-- hard-link support is landed
-- multi-mount composition is the next larger filesystem step and should be deliberate
+- current host-backed design stays centered on one `/workspace` mount
+- additional mounts and lazy file providers are not active roadmap work for this pass
+- current filesystem boundaries and limits stay documented in compatibility/limitations docs
 
 ## Extension Surface
 
-`abash` now exposes the smaller extension layer that makes the most sense for embedders:
+Status: complete for the current embedding target.
 
-- argv-mode custom command registration
-- top-level pre/post execution hooks
-
-Status:
-
-- custom command registration: landed
-- lightweight execution hooks: landed
-- AST rewrite plugins remain intentionally out of scope for now; the current hook boundary is enough for request/result instrumentation without committing to a script-transform API
-
-Next focus: no active extension-surface roadmap items.
+- argv-mode custom command registration is landed
+- top-level pre/post execution hooks are landed
+- AST rewrite plugins are intentionally out of scope for now
 
 ## Network Work
 
-`abash` already has a stronger explicit zero-trust policy story than the original comparison target in some areas, but the published surface is still narrower.
+Status: complete for the current parity target.
 
-Main follow-up items:
+- policy-gated `curl` is the supported network surface
+- broader `curl` fidelity is not active roadmap work in this pass
 
-- broader `curl` behavior if parity matters
+## Closeout
 
-Recommended order:
-
-1. targeted `curl` improvements driven by real workflows
-
-## Suggested Sequence
-
-If the goal is to move closer to `just-bash` with high payoff and controlled scope:
-
-1. execution-state decision
-2. custom command registration
-3. `jq` depth
-4. multi-mount filesystem composition
+No active items remain in this roadmap. Future work should start from concrete product needs, upstream drift, or new phase docs rather than reopening this comparison checklist.
