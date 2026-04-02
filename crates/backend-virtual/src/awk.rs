@@ -44,12 +44,18 @@ enum AwkStmt {
     Print(Vec<AwkExpr>),
     Printf(Vec<AwkExpr>),
     Assign {
-        name: String,
+        target: AssignTarget,
         op: AssignOp,
         expr: AwkExpr,
     },
 }
 
+enum AssignTarget {
+    Scalar(String),
+    Array { name: String, key: AwkExpr },
+}
+
+#[derive(Clone, Copy)]
 enum AssignOp {
     Set,
     Add,
@@ -63,6 +69,7 @@ enum AwkExpr {
     Field(usize),
     Counter(AwkCounter),
     Variable(String),
+    ArrayIndex { name: String, key: Box<AwkExpr> },
     StringLiteral(String),
     RegexLiteral(String),
     NumberLiteral(f64),
@@ -148,6 +155,7 @@ impl AwkValue {
 #[derive(Default)]
 struct RuntimeState {
     vars: BTreeMap<String, AwkValue>,
+    arrays: BTreeMap<String, BTreeMap<String, AwkValue>>,
     output: String,
 }
 
@@ -365,14 +373,8 @@ fn parse_stmt(source: &str) -> Result<AwkStmt, SandboxError> {
         ("=", AssignOp::Set),
     ] {
         if let Some(index) = find_operator_outside_quotes(source, needle) {
-            let name = source[..index].trim();
-            if !is_identifier(name) {
-                return Err(SandboxError::InvalidRequest(format!(
-                    "awk assignment target is not supported: {name}"
-                )));
-            }
             return Ok(AwkStmt::Assign {
-                name: name.to_string(),
+                target: parse_assign_target(source[..index].trim())?,
                 op,
                 expr: parse_expr(source[index + needle.len()..].trim())?,
             });
@@ -381,6 +383,31 @@ fn parse_stmt(source: &str) -> Result<AwkStmt, SandboxError> {
 
     Err(SandboxError::InvalidRequest(format!(
         "awk statement is not supported: {source}"
+    )))
+}
+
+fn parse_assign_target(source: &str) -> Result<AssignTarget, SandboxError> {
+    if is_identifier(source) {
+        return Ok(AssignTarget::Scalar(source.to_string()));
+    }
+
+    if let Some(open) = source.find('[') {
+        let Some(key_source) = source.strip_suffix(']').map(|value| &value[open + 1..]) else {
+            return Err(SandboxError::InvalidRequest(format!(
+                "awk assignment target is not supported: {source}"
+            )));
+        };
+        let name = source[..open].trim();
+        if is_identifier(name) {
+            return Ok(AssignTarget::Array {
+                name: name.to_string(),
+                key: parse_expr(key_source.trim())?,
+            });
+        }
+    }
+
+    Err(SandboxError::InvalidRequest(format!(
+        "awk assignment target is not supported: {source}"
     )))
 }
 
@@ -566,6 +593,20 @@ impl<'a> ExprParser<'a> {
             return Err(SandboxError::InvalidRequest(
                 "awk expression must not be empty".to_string(),
             ));
+        }
+        self.skip_ws();
+        if self.consume("[") {
+            let key = self.parse_expr()?;
+            self.skip_ws();
+            if !self.consume("]") {
+                return Err(SandboxError::InvalidRequest(
+                    "awk array index is missing a closing ']'".to_string(),
+                ));
+            }
+            return Ok(AwkExpr::ArrayIndex {
+                name: ident,
+                key: Box::new(key),
+            });
         }
         Ok(match ident.as_str() {
             "NF" => AwkExpr::Counter(AwkCounter::Nf),
@@ -893,31 +934,45 @@ fn execute_stmt(
         AwkStmt::Printf(exprs) => {
             state.output.push_str(&render_printf(exprs, record, state)?);
         }
-        AwkStmt::Assign { name, op, expr } => {
+        AwkStmt::Assign { target, op, expr } => {
             let right = eval_expr(expr, record, state)?;
-            let next = match op {
-                AssignOp::Set => right,
-                AssignOp::Add => AwkValue::Number(
-                    state.vars.get(name).map(AwkValue::to_number).unwrap_or(0.0)
-                        + right.to_number(),
-                ),
-                AssignOp::Sub => AwkValue::Number(
-                    state.vars.get(name).map(AwkValue::to_number).unwrap_or(0.0)
-                        - right.to_number(),
-                ),
-                AssignOp::Mul => AwkValue::Number(
-                    state.vars.get(name).map(AwkValue::to_number).unwrap_or(0.0)
-                        * right.to_number(),
-                ),
-                AssignOp::Div => AwkValue::Number(
-                    state.vars.get(name).map(AwkValue::to_number).unwrap_or(0.0)
-                        / right.to_number(),
-                ),
-            };
-            state.vars.insert(name.clone(), next);
+            match target {
+                AssignTarget::Scalar(name) => {
+                    let next = apply_assignment(state.vars.get(name), *op, right);
+                    state.vars.insert(name.clone(), next);
+                }
+                AssignTarget::Array { name, key } => {
+                    let key = eval_expr(key, record, state)?.to_string_value();
+                    let current = state.arrays.get(name).and_then(|items| items.get(&key));
+                    let next = apply_assignment(current, *op, right);
+                    state
+                        .arrays
+                        .entry(name.clone())
+                        .or_default()
+                        .insert(key, next);
+                }
+            }
         }
     }
     Ok(())
+}
+
+fn apply_assignment(current: Option<&AwkValue>, op: AssignOp, right: AwkValue) -> AwkValue {
+    match op {
+        AssignOp::Set => right,
+        AssignOp::Add => {
+            AwkValue::Number(current.map(AwkValue::to_number).unwrap_or(0.0) + right.to_number())
+        }
+        AssignOp::Sub => {
+            AwkValue::Number(current.map(AwkValue::to_number).unwrap_or(0.0) - right.to_number())
+        }
+        AssignOp::Mul => {
+            AwkValue::Number(current.map(AwkValue::to_number).unwrap_or(0.0) * right.to_number())
+        }
+        AssignOp::Div => {
+            AwkValue::Number(current.map(AwkValue::to_number).unwrap_or(0.0) / right.to_number())
+        }
+    }
 }
 
 fn render_printf(
@@ -975,6 +1030,15 @@ fn eval_expr(
                     .cloned()
                     .unwrap_or_else(|| AwkValue::String(String::new()))
             }
+        }
+        AwkExpr::ArrayIndex { name, key } => {
+            let key = eval_expr(key, record, state)?.to_string_value();
+            state
+                .arrays
+                .get(name)
+                .and_then(|items| items.get(&key))
+                .cloned()
+                .unwrap_or_else(|| AwkValue::String(String::new()))
         }
         AwkExpr::StringLiteral(value) => AwkValue::String(value.clone()),
         AwkExpr::RegexLiteral(pattern) => AwkValue::Number(regex_matches(
@@ -1226,5 +1290,20 @@ mod tests {
 
         let output = run_program(&program, &BTreeMap::new(), Some(','), &inputs).unwrap();
         assert_eq!(output, "bert:2");
+    }
+
+    #[test]
+    fn supports_array_assignments_and_reads() {
+        let program = parse_program(
+            r#"BEGIN { counts["core"] = 1 } { counts[$2] += $3 } END { print counts["core"], counts["product"] }"#,
+        )
+        .unwrap();
+        let inputs = vec![AwkInput {
+            filename: "/workspace/data.csv".to_string(),
+            text: "bert,core,2\nana,product,9\ncami,core,3\n".to_string(),
+        }];
+
+        let output = run_program(&program, &BTreeMap::new(), Some(','), &inputs).unwrap();
+        assert_eq!(output, "6 9\n");
     }
 }

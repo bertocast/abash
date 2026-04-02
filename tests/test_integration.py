@@ -531,6 +531,24 @@ async def test_argv_mode_awk_supports_regex_literals_and_printf() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_awk_supports_array_accumulators() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/sales.csv", "bert,core,2\nana,product,9\ncami,core,3\n")
+        result = await bash.exec(
+            [
+                "awk",
+                "-F",
+                ",",
+                '{ totals[$2] += $3 } END { print totals["core"], totals["product"] }',
+                "/workspace/sales.csv",
+            ]
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "5 9\n"
+
+
+@pytest.mark.anyio
 async def test_argv_mode_jq_supports_paths_slices_and_raw_output() -> None:
     async with Bash() as bash:
         result = await bash.exec(
