@@ -42,7 +42,7 @@
 - `paste` with optional `-d`: supported
 - literal `sed` substitution `s/old/new/` with optional `g`: supported
 - `join` with exactly two pre-sorted inputs plus optional `-t`, `-1`, `-2`: supported
-- narrow `awk` with optional `-F`, `-v`, `BEGIN`/`END`, `print`, `printf`, variables, scalar and array assignments, `delete`, `next`, arithmetic, regex literals, `$0/$N`, `NF/NR/FNR/FILENAME`, and basic comparisons / `~` / `!~`: supported
+- narrow `awk` with optional `-F`, `-v`, `BEGIN`/`END`, `print`, `printf`, variables, scalar and array assignments, statement-level `if/else`, `delete`, `next`, arithmetic, regex literals, `$0/$N`, `NF/NR/FNR/FILENAME`, and basic comparisons / `~` / `!~`: supported
 - narrow `env` with optional `-i`, inline `KEY=VALUE`, and optional command exec: supported
 - narrow `which` against the sandbox allowlist: supported
 - `dirname` / `basename` path transforms: supported

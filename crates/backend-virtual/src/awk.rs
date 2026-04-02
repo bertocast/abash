@@ -43,6 +43,11 @@ enum RuleKind {
 enum AwkStmt {
     Print(Vec<AwkExpr>),
     Printf(Vec<AwkExpr>),
+    If {
+        condition: AwkExpr,
+        then_stmt: Box<AwkStmt>,
+        else_stmt: Option<Box<AwkStmt>>,
+    },
     Assign {
         target: AssignTarget,
         op: AssignOp,
@@ -357,6 +362,9 @@ fn parse_action_block(source: &str) -> Result<Vec<AwkStmt>, SandboxError> {
 
 fn parse_stmt(source: &str) -> Result<AwkStmt, SandboxError> {
     let source = source.trim();
+    if source.starts_with("if ") || source.starts_with("if(") {
+        return parse_if_stmt(source["if".len()..].trim_start());
+    }
     if source == "next" {
         return Ok(AwkStmt::Next);
     }
@@ -400,6 +408,37 @@ fn parse_stmt(source: &str) -> Result<AwkStmt, SandboxError> {
     Err(SandboxError::InvalidRequest(format!(
         "awk statement is not supported: {source}"
     )))
+}
+
+fn parse_if_stmt(source: &str) -> Result<AwkStmt, SandboxError> {
+    if !source.starts_with('(') {
+        return Err(SandboxError::InvalidRequest(
+            "awk if statement requires a parenthesized condition".to_string(),
+        ));
+    }
+    let close = find_matching_paren(source, 0)?;
+    let condition = parse_expr(source[1..close].trim())?;
+    let remainder = source[close + 1..].trim();
+    if remainder.is_empty() {
+        return Err(SandboxError::InvalidRequest(
+            "awk if statement requires a consequent statement".to_string(),
+        ));
+    }
+    let (then_source, else_source) =
+        if let Some(index) = find_keyword_outside_quotes(remainder, "else") {
+            (&remainder[..index], Some(&remainder[index + 4..]))
+        } else {
+            (remainder, None)
+        };
+
+    Ok(AwkStmt::If {
+        condition,
+        then_stmt: Box::new(parse_stmt(then_source.trim())?),
+        else_stmt: else_source
+            .map(|value| parse_stmt(value.trim()))
+            .transpose()?
+            .map(Box::new),
+    })
 }
 
 fn parse_assign_target(source: &str) -> Result<AssignTarget, SandboxError> {
@@ -786,6 +825,29 @@ fn find_matching_brace(source: &str, open_index: usize) -> Result<usize, Sandbox
     ))
 }
 
+fn find_matching_paren(source: &str, open_index: usize) -> Result<usize, SandboxError> {
+    let mut active_quote = None::<char>;
+    let mut depth = 0usize;
+    for (index, ch) in source[open_index..].char_indices() {
+        let absolute = open_index + index;
+        match active_quote {
+            Some(quote) if ch == quote => active_quote = None,
+            None if ch == '\'' || ch == '"' => active_quote = Some(ch),
+            None if ch == '(' => depth += 1,
+            None if ch == ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Ok(absolute);
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(SandboxError::InvalidRequest(
+        "awk if condition is missing a closing ')'".to_string(),
+    ))
+}
+
 fn find_operator_outside_quotes(source: &str, operator: &str) -> Option<usize> {
     let mut active_quote = None::<char>;
     let mut index = 0usize;
@@ -801,6 +863,43 @@ fn find_operator_outside_quotes(source: &str, operator: &str) -> Option<usize> {
                 index += ch.len_utf8();
             }
             None if source[index..].starts_with(operator) => return Some(index),
+            _ => index += ch.len_utf8(),
+        }
+    }
+    None
+}
+
+fn find_keyword_outside_quotes(source: &str, keyword: &str) -> Option<usize> {
+    let mut active_quote = None::<char>;
+    let mut index = 0usize;
+    while index < source.len() {
+        let ch = source[index..].chars().next()?;
+        match active_quote {
+            Some(quote) if ch == quote => {
+                active_quote = None;
+                index += ch.len_utf8();
+            }
+            None if ch == '\'' || ch == '"' => {
+                active_quote = Some(ch);
+                index += ch.len_utf8();
+            }
+            None if source[index..].starts_with(keyword) => {
+                let before_ok = index == 0
+                    || source[..index]
+                        .chars()
+                        .next_back()
+                        .is_some_and(char::is_whitespace);
+                let after = index + keyword.len();
+                let after_ok = after == source.len()
+                    || source[after..]
+                        .chars()
+                        .next()
+                        .is_some_and(char::is_whitespace);
+                if before_ok && after_ok {
+                    return Some(index);
+                }
+                index += keyword.len();
+            }
             _ => index += ch.len_utf8(),
         }
     }
@@ -963,6 +1062,19 @@ fn execute_stmt(
         AwkStmt::Printf(exprs) => {
             state.output.push_str(&render_printf(exprs, record, state)?);
             Ok(StmtSignal::Continue)
+        }
+        AwkStmt::If {
+            condition,
+            then_stmt,
+            else_stmt,
+        } => {
+            if eval_expr(condition, record, state)?.truthy() {
+                execute_stmt(then_stmt, record, state)
+            } else if let Some(else_stmt) = else_stmt {
+                execute_stmt(else_stmt, record, state)
+            } else {
+                Ok(StmtSignal::Continue)
+            }
         }
         AwkStmt::Assign { target, op, expr } => {
             let right = eval_expr(expr, record, state)?;
@@ -1365,5 +1477,17 @@ mod tests {
 
         let output = run_program(&program, &BTreeMap::new(), Some(','), &inputs).unwrap();
         assert_eq!(output, "keep \n");
+    }
+
+    #[test]
+    fn supports_if_else_statements() {
+        let program = parse_program(r#"{ if ($2 == "skip") print "s" else print $1 }"#).unwrap();
+        let inputs = vec![AwkInput {
+            filename: "/workspace/data.csv".to_string(),
+            text: "bert,keep\nana,skip\n".to_string(),
+        }];
+
+        let output = run_program(&program, &BTreeMap::new(), Some(','), &inputs).unwrap();
+        assert_eq!(output, "bert\ns\n");
     }
 }

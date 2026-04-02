@@ -568,6 +568,24 @@ async def test_argv_mode_awk_supports_next_and_delete() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_awk_supports_if_else_statements() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/people.csv", "bert,keep\nana,skip\n")
+        result = await bash.exec(
+            [
+                "awk",
+                "-F",
+                ",",
+                '{ if ($2 == "skip") print "s" else print $1 }',
+                "/workspace/people.csv",
+            ]
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "bert\ns\n"
+
+
+@pytest.mark.anyio
 async def test_argv_mode_jq_supports_paths_slices_and_raw_output() -> None:
     async with Bash() as bash:
         result = await bash.exec(
