@@ -2,68 +2,170 @@
 
 Comparison baseline: `just-bash` from Vercel Labs.
 
-This parity pass is complete. There are no active roadmap items left from the current `just-bash` comparison run.
+Command-name parity is complete. The remaining work is not about adding more command names. It is about making the current surface behave more like `just-bash` where that improves real workflows.
 
-## Command Surface
+## Priority 1: Custom Command Integration
 
-Status: complete.
+This is the biggest remaining product difference.
 
-- published command-name parity with the `just-bash` README is landed
-- future command additions, if any, should follow upstream changes or concrete workflow demand rather than this parity plan
+Current `abash` state:
 
-## Shell Language
+- argv-mode custom commands are supported
+- top-level pre/post execution hooks are supported
 
-Status: complete for the intended narrow shell layer.
+Current `just-bash` shape:
 
-- simple commands, pipes, chaining, redirects, globbing, and variable expansion are landed
-- `if` / `elif`, `while`, `until`, `for`, and narrow `name() { ... }` functions with `local` are landed
-- larger shell constructs such as `case`, `return`, `break`, and `continue` remain explicit compatibility limits rather than active roadmap work
+- custom commands behave like real shell commands
+- they compose with pipes, redirects, and shell features
+- they receive richer execution context
 
-## Execution Semantics
+Recommended work:
 
-Status: decided.
+1. let custom commands participate inside script-mode pipelines and redirections
+2. expose a richer execution context to custom commands
+3. support nested command execution from custom commands
 
-- default behavior stays session-persistent
-- `session_state="per_exec"` remains the opt-in reset mode for closer `just-bash` behavior
-- filesystem persistence stays shared across both modes
+Why first:
 
-## Command Behavior
+- highest embedder value
+- clearest remaining parity difference
+- stronger product payoff than deepening one more builtin
 
-Status: complete for the current parity target.
+## Priority 2: Filesystem Breadth
 
-- `jq`, `yq`, `xan`, `awk`, `grep`, `ln`, and the broader text/file toolkit were expanded to the planned narrow-but-useful surface
-- remaining behavioral differences are documented in [`docs/compatibility.md`](/Users/alberto/repos/abash/docs/compatibility.md) and [`docs/known-limitations.md`](/Users/alberto/repos/abash/docs/known-limitations.md), not tracked as active roadmap work
+This is the next largest architectural difference.
 
-## JavaScript Runtime
+Current `abash` state:
 
-Status: decided.
+- one `/workspace` mount
+- current host-backed modes are deliberate and narrow
 
-- `js-exec` intentionally uses host Node.js with workspace shims
-- closer QuickJS/WASM-style isolation is not an active roadmap item in this pass
+Current `just-bash` shape:
 
-## Filesystem Model
+- multi-mount composition
+- lazy file providers
+- more filesystem adapter surface
 
-Status: decided.
+Recommended work:
 
-- current host-backed design stays centered on one `/workspace` mount
-- additional mounts and lazy file providers are not active roadmap work for this pass
-- current filesystem boundaries and limits stay documented in compatibility/limitations docs
+1. support multiple mounts explicitly
+2. add lazy file-provider hooks for on-demand content
+3. keep current path and policy guarantees intact while broadening mount shape
 
-## Extension Surface
+Why second:
 
-Status: complete for the current embedding target.
+- unlocks more realistic embedding scenarios
+- materially changes what can be modeled, not just syntax
 
-- argv-mode custom command registration is landed
-- top-level pre/post execution hooks are landed
-- AST rewrite plugins are intentionally out of scope for now
+## Priority 3: JavaScript Runtime Direction
 
-## Network Work
+This is the strongest trust-model difference.
 
-Status: complete for the current parity target.
+Current `abash` state:
 
-- policy-gated `curl` is the supported network surface
-- broader `curl` fidelity is not active roadmap work in this pass
+- `js-exec` uses host Node.js with workspace shims
 
-## Closeout
+Current `just-bash` shape:
 
-No active items remain in this roadmap. Future work should start from concrete product needs, upstream drift, or new phase docs rather than reopening this comparison checklist.
+- `js-exec` runs through QuickJS/WASM isolation
+
+Recommended work:
+
+1. decide whether host-Node remains the intended default long-term
+2. if parity matters, add an isolated JavaScript runtime mode
+3. if both modes exist, make the tradeoff explicit in configuration and docs
+
+Why third:
+
+- important architectural choice
+- larger implementation cost than the first two tracks
+- should be a deliberate decision, not incremental drift
+
+## Priority 4: Execution Model Alignment
+
+This is now mostly an API and ergonomics difference.
+
+Current `abash` state:
+
+- session-persistent shell state by default
+- opt-in `session_state="per_exec"` for reset semantics
+
+Current `just-bash` shape:
+
+- per-exec shell reset by default
+- more per-exec controls like `replaceEnv`, raw-script handling, and direct argv injection
+
+Recommended work:
+
+1. keep the current default unless product direction changes
+2. consider adding narrow convenience flags comparable to `replaceEnv`
+3. only revisit the default if strong user demand shows up
+
+Why fourth:
+
+- the major semantic choice is already explicit
+- lower urgency than custom-command and filesystem work
+
+## Priority 5: Builtin Behavior Depth
+
+This is now the long tail.
+
+Current `abash` state:
+
+- broad command surface
+- many commands intentionally narrow
+
+Most useful follow-ups:
+
+1. `awk`
+2. `xan`
+3. `yq`
+4. `jq`
+5. `curl`
+
+Recommended rule:
+
+- deepen commands only when a concrete workflow needs it
+- avoid chasing GNU-complete behavior for its own sake
+
+Why fifth:
+
+- many workflows are already covered
+- most remaining work here is incremental, not architectural
+
+## Priority 6: Shell Semantics Beyond The Current Narrow Layer
+
+Current `abash` state:
+
+- loops and narrow functions are landed
+- no `case`
+- no `return`, `break`, `continue`
+- no subshells or command substitution
+
+Recommended work:
+
+1. only expand this area if a concrete workflow is blocked
+2. prefer a small, predictable shell surface over broad but brittle emulation
+
+Why sixth:
+
+- lower product payoff than the items above
+- higher parser/runtime complexity
+
+## Operating Rule
+
+For the next phase of work:
+
+1. prioritize embedder value over command-count growth
+2. prefer architecture wins over one-off builtin deepening
+3. keep docs honest whenever behavior stays intentionally narrow
+
+## Suggested Sequence
+
+If work resumes immediately, this is the best order:
+
+1. richer custom command composition
+2. multi-mount filesystem support
+3. JavaScript runtime decision
+4. execution-model/API refinement
+5. targeted builtin deepening driven by real workflows

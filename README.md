@@ -92,10 +92,10 @@ Command-name parity history is tracked in [docs/pending_commands.md](docs/pendin
 
 ## Extension Surface
 
-- `Bash(custom_commands={...})` registers host-side argv-mode commands that return normal `ExecutionResult` payloads.
+- `Bash(custom_commands={...})` registers host-side commands that can run in argv mode or inside script-mode pipelines and redirections.
 - `pre_exec_hook` can rewrite top-level requests before dispatch.
 - `post_exec_hook` can observe or replace top-level results after dispatch.
-- Both hooks are intentionally narrow; they operate on the top-level request/result boundary, not on the internal script AST.
+- Hooks remain intentionally narrow; they operate on the top-level request/result boundary, not on the internal script AST.
 
 ## Script Compatibility
 

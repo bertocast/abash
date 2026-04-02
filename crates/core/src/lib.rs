@@ -268,6 +268,7 @@ pub trait SessionBackend: Send {
         request: ExecutionRequest,
         config: &SandboxConfig,
         cancel_flag: &AtomicBool,
+        extensions: Option<&dyn SandboxExtensions>,
     ) -> Result<ExecutionResult, SandboxError>;
 
     fn read_file(&mut self, _path: &str) -> Result<Vec<u8>, SandboxError> {
@@ -308,9 +309,19 @@ pub trait SessionBackend: Send {
     }
 }
 
+pub trait SandboxExtensions: Send + Sync {
+    fn exec_custom_command(
+        &self,
+        _request: &ExecutionRequest,
+    ) -> Result<Option<ExecutionResult>, SandboxError> {
+        Ok(None)
+    }
+}
+
 pub struct SandboxSession {
     config: SandboxConfig,
     backend: Box<dyn SessionBackend>,
+    extensions: Option<Arc<dyn SandboxExtensions>>,
     cancel_flag: Arc<AtomicBool>,
     closed: bool,
 }
@@ -319,11 +330,13 @@ impl SandboxSession {
     pub fn new(
         config: SandboxConfig,
         backend: Box<dyn SessionBackend>,
+        extensions: Option<Arc<dyn SandboxExtensions>>,
         cancel_flag: Arc<AtomicBool>,
     ) -> Self {
         Self {
             config,
             backend,
+            extensions,
             cancel_flag,
             closed: false,
         }
@@ -334,10 +347,12 @@ impl SandboxSession {
             return ExecutionResult::failure(SandboxError::ClosedSession, self.base_metadata());
         }
 
-        match self
-            .backend
-            .run(request, &self.config, self.cancel_flag.as_ref())
-        {
+        match self.backend.run(
+            request,
+            &self.config,
+            self.cancel_flag.as_ref(),
+            self.extensions.as_deref(),
+        ) {
             Ok(result) => result,
             Err(error) => ExecutionResult::failure(error, self.base_metadata()),
         }

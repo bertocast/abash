@@ -10,7 +10,7 @@
 - detached runs are in-process only and are lost if the embedding interpreter exits
 - only one active run is allowed per `Bash` session
 - run events and output accessors are buffered snapshots; there is no live streaming log API yet
-- custom commands and execution hooks currently apply only at the top-level argv request boundary; script-internal command interception and AST rewrite plugins are still out of scope
+- custom commands can run inside script dispatch now, but hooks still only apply at the top-level request boundary; AST rewrite plugins and richer custom-command context objects are still out of scope
 - pipeline execution is buffered and sequential rather than streaming or process-concurrent
 - shell state defaults to session-persistent behavior; `session_state="per_exec"` resets `cwd`, exported env, aliases, and history between calls, but filesystem contents remain shared
 - variable support is limited to explicit request env, `export`, and command-local assignments; there is no general persistent shell variable state beyond exported env

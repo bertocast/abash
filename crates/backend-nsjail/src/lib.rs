@@ -1,6 +1,9 @@
 use std::sync::atomic::AtomicBool;
 
-use abash_core::{ExecutionRequest, ExecutionResult, SandboxConfig, SandboxError, SessionBackend};
+use abash_core::{
+    ExecutionRequest, ExecutionResult, SandboxConfig, SandboxError, SandboxExtensions,
+    SessionBackend,
+};
 
 pub fn create_session(_config: SandboxConfig) -> Result<Box<dyn SessionBackend>, SandboxError> {
     Ok(Box::new(NsjailSession))
@@ -18,6 +21,7 @@ impl SessionBackend for NsjailSession {
         _request: ExecutionRequest,
         _config: &SandboxConfig,
         _cancel_flag: &AtomicBool,
+        _extensions: Option<&dyn SandboxExtensions>,
     ) -> Result<ExecutionResult, SandboxError> {
         Err(SandboxError::UnsupportedFeature(
             backend_message().to_string(),

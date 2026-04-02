@@ -6,7 +6,9 @@ use std::sync::{
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use abash_core::{ErrorKind, ExecutionRequest, ExecutionResult, SandboxError, SandboxSession};
+use abash_core::{
+    ErrorKind, ExecutionRequest, ExecutionResult, SandboxError, SandboxExtensions, SandboxSession,
+};
 use parking_lot::{Condvar, Mutex};
 use pyo3::prelude::*;
 
@@ -25,6 +27,48 @@ pub struct RuntimeCallbacks {
     pub custom_command_names: std::collections::BTreeSet<String>,
     pub pre_exec_hook: Option<Arc<Py<PyAny>>>,
     pub post_exec_hook: Option<Arc<Py<PyAny>>>,
+}
+
+#[derive(Clone, Default)]
+pub struct PythonExtensions {
+    pub custom_command_callback: Option<Arc<Py<PyAny>>>,
+    pub custom_command_names: std::collections::BTreeSet<String>,
+}
+
+impl SandboxExtensions for PythonExtensions {
+    fn exec_custom_command(
+        &self,
+        request: &ExecutionRequest,
+    ) -> Result<Option<ExecutionResult>, SandboxError> {
+        let Some(command) = request.argv.first() else {
+            return Ok(None);
+        };
+        if !self.custom_command_names.contains(command) {
+            return Ok(None);
+        }
+        let Some(callback) = self.custom_command_callback.as_ref() else {
+            return Ok(None);
+        };
+        Python::with_gil(|py| -> Result<Option<ExecutionResult>, SandboxError> {
+            let request_payload =
+                crate::execution_request_to_python(py, request).map_err(python_callback_error)?;
+            let result_payload = callback
+                .bind(py)
+                .call1((request_payload,))
+                .map_err(python_callback_error)?;
+            let mut result = crate::python_to_execution_result(&result_payload)
+                .map_err(python_callback_error)?;
+            result
+                .metadata
+                .entry("backend".to_string())
+                .or_insert_with(|| "custom".to_string());
+            result
+                .metadata
+                .entry("command".to_string())
+                .or_insert_with(|| command.clone());
+            Ok(Some(result))
+        })
+    }
 }
 
 pub struct SandboxRuntime {
@@ -494,42 +538,23 @@ impl ThreadRuntime {
         if request.mode != abash_core::ExecutionMode::Argv {
             return Ok(None);
         }
-        let Some(command) = request.argv.first() else {
-            return Ok(None);
+        let extensions = PythonExtensions {
+            custom_command_callback: self.callbacks.custom_command_callback.clone(),
+            custom_command_names: self.callbacks.custom_command_names.clone(),
         };
-        if !self.callbacks.custom_command_names.contains(command) {
-            return Ok(None);
-        }
-        let Some(callback) = self.callbacks.custom_command_callback.as_ref() else {
-            return Ok(None);
+        let mut result = match extensions.exec_custom_command(request)? {
+            Some(result) => result,
+            None => return Ok(None),
         };
-        Python::with_gil(|py| -> Result<Option<ExecutionResult>, SandboxError> {
-            let request_payload =
-                crate::execution_request_to_python(py, request).map_err(python_callback_error)?;
-            let result_payload = callback
-                .bind(py)
-                .call1((request_payload,))
-                .map_err(python_callback_error)?;
-            let mut result = crate::python_to_execution_result(&result_payload)
-                .map_err(python_callback_error)?;
-            result
-                .metadata
-                .entry("backend".to_string())
-                .or_insert_with(|| "custom".to_string());
-            result
-                .metadata
-                .entry("command".to_string())
-                .or_insert_with(|| command.clone());
-            result
-                .metadata
-                .entry("profile".to_string())
-                .or_insert_with(|| self.profile.clone());
-            result
-                .metadata
-                .entry("filesystem_mode".to_string())
-                .or_insert_with(|| self.filesystem_mode.clone());
-            Ok(Some(result))
-        })
+        result
+            .metadata
+            .entry("profile".to_string())
+            .or_insert_with(|| self.profile.clone());
+        result
+            .metadata
+            .entry("filesystem_mode".to_string())
+            .or_insert_with(|| self.filesystem_mode.clone());
+        Ok(Some(result))
     }
 
     fn apply_pre_exec_hook(

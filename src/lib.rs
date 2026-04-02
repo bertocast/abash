@@ -15,7 +15,7 @@ mod observability;
 mod runtime;
 
 use observability::{AuditEvent, RunEvent};
-use runtime::{RunState, RuntimeCallbacks, SandboxRuntime};
+use runtime::{PythonExtensions, RunState, RuntimeCallbacks, SandboxRuntime};
 
 #[pyclass(module = "abash._native")]
 struct NativeSandbox {
@@ -90,9 +90,19 @@ impl NativeSandbox {
         };
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let backend = build_backend(&config)?;
+        let custom_command_callback = custom_command_callback.map(Arc::new);
+        let custom_command_names = custom_command_names
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let extensions = Some(Arc::new(PythonExtensions {
+            custom_command_callback: custom_command_callback.clone(),
+            custom_command_names: custom_command_names.clone(),
+        }) as Arc<dyn abash_core::SandboxExtensions>);
         let session = Arc::new(Mutex::new(SandboxSession::new(
             config,
             backend,
+            extensions,
             cancel_flag.clone(),
         )));
         let runtime = Arc::new(SandboxRuntime::new(
@@ -101,11 +111,8 @@ impl NativeSandbox {
             RuntimeCallbacks {
                 event_callback: event_callback.map(Arc::new),
                 audit_callback: audit_callback.map(Arc::new),
-                custom_command_callback: custom_command_callback.map(Arc::new),
-                custom_command_names: custom_command_names
-                    .unwrap_or_default()
-                    .into_iter()
-                    .collect::<BTreeSet<_>>(),
+                custom_command_callback,
+                custom_command_names,
                 pre_exec_hook: pre_exec_hook.map(Arc::new),
                 post_exec_hook: post_exec_hook.map(Arc::new),
             },

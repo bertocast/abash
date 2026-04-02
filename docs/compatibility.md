@@ -15,7 +15,7 @@
 - one-active-run session handles with `wait`, `cancel`, `status`, and buffered output accessors
 - buffered run events plus buffered session audit records
 - optional Python event and audit callbacks with sanitized payloads
-- argv-mode custom command registration plus top-level pre/post execution hooks
+- host-side custom command registration for argv mode and script-internal command dispatch, plus top-level pre/post execution hooks
 - filesystem session persistence for `memory` and `host_cow`
 - host-backed workspace modes with one `/workspace` mount
 - scoped writable roots for `host_readwrite`

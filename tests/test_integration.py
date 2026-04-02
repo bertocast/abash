@@ -2066,6 +2066,28 @@ async def test_custom_commands_support_exec_and_detached_runs() -> None:
 
 
 @pytest.mark.anyio
+async def test_custom_commands_compose_inside_script_mode() -> None:
+    def upper(request: ExecutionRequest) -> ExecutionResult:
+        return ExecutionResult(
+            stdout=request.stdin.upper() if request.stdin else " ".join(request.argv[1:]).upper(),
+            stderr="",
+            exit_code=0,
+            termination_reason=TerminationReason.EXITED,
+            metadata={"custom_command": request.argv[0], "cwd": request.cwd},
+        )
+
+    async with Bash(custom_commands={"upper": upper}) as bash:
+        piped = await bash.exec_script("echo bert | upper | tail -n 1")
+        redirected = await bash.exec_script("upper ana maria > /workspace/out.txt")
+        written = await bash.read_file("/workspace/out.txt")
+
+    assert piped.stdout == "BERT\n"
+    assert piped.metadata["last_command"] == "tail"
+    assert redirected.exit_code == 0
+    assert written == "ANA MARIA"
+
+
+@pytest.mark.anyio
 async def test_exec_hooks_can_transform_requests_and_results() -> None:
     def pre_exec(request: ExecutionRequest) -> ExecutionRequest:
         request.argv = ["echo", "patched"]

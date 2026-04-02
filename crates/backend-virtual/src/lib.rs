@@ -51,8 +51,8 @@ mod yq;
 
 use abash_core::{
     create_filesystem, resolve_sandbox_path, ExecutionMode, ExecutionRequest, ExecutionResult,
-    FilesystemMode, SandboxConfig, SandboxError, SandboxFilesystem, SessionBackend, SessionState,
-    TerminationReason,
+    FilesystemMode, SandboxConfig, SandboxError, SandboxExtensions, SandboxFilesystem,
+    SessionBackend, SessionState, TerminationReason,
 };
 use script::{
     is_valid_assignment_name, parse_script, ChainOp, ForBlock, FunctionDef, IfBlock, Pipeline,
@@ -93,6 +93,7 @@ impl SessionBackend for VirtualSession {
         request: ExecutionRequest,
         config: &SandboxConfig,
         cancel_flag: &AtomicBool,
+        extensions: Option<&dyn SandboxExtensions>,
     ) -> Result<ExecutionResult, SandboxError> {
         if request.network_enabled && config.network_policy.is_none() {
             return Err(SandboxError::PolicyDenied(
@@ -146,8 +147,12 @@ impl SessionBackend for VirtualSession {
         self.push_history(render_history_entry(&request));
 
         let result = match request.mode {
-            ExecutionMode::Argv => self.run_argv(&mut runtime, request, config, cancel_flag),
-            ExecutionMode::Script => self.run_script(&mut runtime, request, config, cancel_flag),
+            ExecutionMode::Argv => {
+                self.run_argv(&mut runtime, request, config, cancel_flag, extensions)
+            }
+            ExecutionMode::Script => {
+                self.run_script(&mut runtime, request, config, cancel_flag, extensions)
+            }
         };
 
         if matches!(self.session_state, SessionState::Persistent) {
@@ -188,6 +193,7 @@ impl VirtualSession {
         request: ExecutionRequest,
         config: &SandboxConfig,
         cancel_flag: &AtomicBool,
+        extensions: Option<&dyn SandboxExtensions>,
     ) -> Result<ExecutionResult, SandboxError> {
         let argv = resolve_alias_words(&request.argv, &runtime.aliases)?;
         let command = argv.first().cloned().ok_or_else(|| {
@@ -203,6 +209,7 @@ impl VirtualSession {
             command,
             config,
             cancel_flag,
+            extensions,
             request.timeout_ms,
             request.network_enabled,
             env,
@@ -216,6 +223,7 @@ impl VirtualSession {
         request: ExecutionRequest,
         config: &SandboxConfig,
         cancel_flag: &AtomicBool,
+        extensions: Option<&dyn SandboxExtensions>,
     ) -> Result<ExecutionResult, SandboxError> {
         let source = request.script.clone().ok_or_else(|| {
             SandboxError::InvalidRequest("script mode requires a script string".to_string())
@@ -233,6 +241,7 @@ impl VirtualSession {
             request.timeout_ms,
             started,
             request.network_enabled,
+            extensions,
             &request.metadata,
             &mut script_stdin,
             &mut state,
@@ -275,6 +284,7 @@ impl VirtualSession {
         timeout_ms: Option<u64>,
         started: Instant,
         network_enabled: bool,
+        extensions: Option<&dyn SandboxExtensions>,
         base_metadata: &BTreeMap<String, String>,
         script_stdin: &mut Option<Vec<u8>>,
         state: &mut ScriptState,
@@ -295,6 +305,7 @@ impl VirtualSession {
                             timeout_ms,
                             started,
                             network_enabled,
+                            extensions,
                             base_metadata,
                             script_stdin,
                         )
@@ -326,6 +337,7 @@ impl VirtualSession {
                     timeout_ms,
                     started,
                     network_enabled,
+                    extensions,
                     base_metadata,
                     script_stdin,
                     state,
@@ -338,6 +350,7 @@ impl VirtualSession {
                     timeout_ms,
                     started,
                     network_enabled,
+                    extensions,
                     base_metadata,
                     script_stdin,
                     state,
@@ -350,6 +363,7 @@ impl VirtualSession {
                     timeout_ms,
                     started,
                     network_enabled,
+                    extensions,
                     base_metadata,
                     script_stdin,
                     state,
@@ -362,6 +376,7 @@ impl VirtualSession {
                     timeout_ms,
                     started,
                     network_enabled,
+                    extensions,
                     base_metadata,
                     script_stdin,
                     state,
@@ -384,6 +399,7 @@ impl VirtualSession {
         timeout_ms: Option<u64>,
         started: Instant,
         network_enabled: bool,
+        extensions: Option<&dyn SandboxExtensions>,
         base_metadata: &BTreeMap<String, String>,
         script_stdin: &mut Option<Vec<u8>>,
         state: &mut ScriptState,
@@ -397,6 +413,7 @@ impl VirtualSession {
                 timeout_ms,
                 started,
                 network_enabled,
+                extensions,
                 base_metadata,
                 script_stdin,
             )
@@ -437,6 +454,7 @@ impl VirtualSession {
             timeout_ms,
             started,
             network_enabled,
+            extensions,
             base_metadata,
             script_stdin,
             &mut branch_state,
@@ -464,6 +482,7 @@ impl VirtualSession {
         timeout_ms: Option<u64>,
         started: Instant,
         network_enabled: bool,
+        extensions: Option<&dyn SandboxExtensions>,
         base_metadata: &BTreeMap<String, String>,
         script_stdin: &mut Option<Vec<u8>>,
         state: &mut ScriptState,
@@ -480,6 +499,7 @@ impl VirtualSession {
                     timeout_ms,
                     started,
                     network_enabled,
+                    extensions,
                     base_metadata,
                     script_stdin,
                 )
@@ -518,6 +538,7 @@ impl VirtualSession {
                 timeout_ms,
                 started,
                 network_enabled,
+                extensions,
                 base_metadata,
                 script_stdin,
                 &mut body_state,
@@ -541,6 +562,7 @@ impl VirtualSession {
         timeout_ms: Option<u64>,
         started: Instant,
         network_enabled: bool,
+        extensions: Option<&dyn SandboxExtensions>,
         base_metadata: &BTreeMap<String, String>,
         script_stdin: &mut Option<Vec<u8>>,
         state: &mut ScriptState,
@@ -557,6 +579,7 @@ impl VirtualSession {
                     timeout_ms,
                     started,
                     network_enabled,
+                    extensions,
                     base_metadata,
                     script_stdin,
                 )
@@ -595,6 +618,7 @@ impl VirtualSession {
                 timeout_ms,
                 started,
                 network_enabled,
+                extensions,
                 base_metadata,
                 script_stdin,
                 &mut body_state,
@@ -618,6 +642,7 @@ impl VirtualSession {
         timeout_ms: Option<u64>,
         started: Instant,
         network_enabled: bool,
+        extensions: Option<&dyn SandboxExtensions>,
         base_metadata: &BTreeMap<String, String>,
         script_stdin: &mut Option<Vec<u8>>,
         state: &mut ScriptState,
@@ -649,6 +674,7 @@ impl VirtualSession {
                 timeout_ms,
                 started,
                 network_enabled,
+                extensions,
                 base_metadata,
                 script_stdin,
                 &mut body_state,
@@ -689,6 +715,7 @@ impl VirtualSession {
         timeout_ms: Option<u64>,
         started: Instant,
         network_enabled: bool,
+        extensions: Option<&dyn SandboxExtensions>,
         base_metadata: &BTreeMap<String, String>,
         script_stdin: &mut Option<Vec<u8>>,
     ) -> Result<ExecutionResult, SandboxError> {
@@ -732,6 +759,7 @@ impl VirtualSession {
                 command_name.clone(),
                 config,
                 cancel_flag,
+                extensions,
                 remaining_timeout,
                 network_enabled,
                 command_env.clone(),
@@ -785,11 +813,48 @@ impl VirtualSession {
         command: String,
         config: &SandboxConfig,
         cancel_flag: &AtomicBool,
+        extensions: Option<&dyn SandboxExtensions>,
         timeout_ms: Option<u64>,
         network_enabled: bool,
         env: BTreeMap<String, String>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
+        if let Some(extensions) = extensions {
+            let custom_request = ExecutionRequest {
+                mode: ExecutionMode::Argv,
+                argv: std::iter::once(command.clone())
+                    .chain(args.clone())
+                    .collect(),
+                script: None,
+                cwd: cwd.to_string(),
+                env: env.clone(),
+                stdin: stdin.clone(),
+                timeout_ms,
+                network_enabled,
+                filesystem_mode: config.filesystem_mode.clone(),
+                metadata: metadata.clone(),
+            };
+            if let Some(mut result) = extensions.exec_custom_command(&custom_request)? {
+                result
+                    .metadata
+                    .entry("backend".to_string())
+                    .or_insert_with(|| "custom".to_string());
+                result
+                    .metadata
+                    .entry("command".to_string())
+                    .or_insert_with(|| command.clone());
+                result
+                    .metadata
+                    .entry("cwd".to_string())
+                    .or_insert_with(|| cwd.to_string());
+                result
+                    .metadata
+                    .entry("filesystem_mode".to_string())
+                    .or_insert_with(|| config.filesystem_mode.as_str().to_string());
+                return Ok(result);
+            }
+        }
+
         if runtime.functions.contains_key(&command) {
             return self.run_function_call(
                 runtime,
@@ -797,6 +862,7 @@ impl VirtualSession {
                 args,
                 config,
                 cancel_flag,
+                extensions,
                 timeout_ms,
                 network_enabled,
                 metadata,
@@ -823,6 +889,7 @@ impl VirtualSession {
                 args,
                 config,
                 cancel_flag,
+                extensions,
                 timeout_ms,
                 network_enabled,
                 env,
@@ -849,6 +916,7 @@ impl VirtualSession {
                 args,
                 config,
                 cancel_flag,
+                extensions,
                 timeout_ms,
                 network_enabled,
                 metadata,
@@ -859,6 +927,7 @@ impl VirtualSession {
                 args,
                 config,
                 cancel_flag,
+                extensions,
                 timeout_ms,
                 network_enabled,
                 metadata,
@@ -877,6 +946,7 @@ impl VirtualSession {
                 args,
                 config,
                 cancel_flag,
+                extensions,
                 timeout_ms,
                 network_enabled,
                 metadata,
@@ -962,6 +1032,7 @@ impl VirtualSession {
                 stdin,
                 config,
                 cancel_flag,
+                extensions,
                 timeout_ms,
                 network_enabled,
                 env,
@@ -1031,6 +1102,7 @@ impl VirtualSession {
         source: String,
         config: &SandboxConfig,
         cancel_flag: &AtomicBool,
+        extensions: Option<&dyn SandboxExtensions>,
         timeout_ms: Option<u64>,
         network_enabled: bool,
         metadata: BTreeMap<String, String>,
@@ -1049,6 +1121,7 @@ impl VirtualSession {
             timeout_ms,
             started,
             network_enabled,
+            extensions,
             &metadata,
             &mut script_stdin,
             &mut state,
@@ -1090,6 +1163,7 @@ impl VirtualSession {
         args: Vec<String>,
         config: &SandboxConfig,
         cancel_flag: &AtomicBool,
+        extensions: Option<&dyn SandboxExtensions>,
         timeout_ms: Option<u64>,
         network_enabled: bool,
         metadata: BTreeMap<String, String>,
@@ -1112,6 +1186,7 @@ impl VirtualSession {
             timeout_ms,
             started,
             network_enabled,
+            extensions,
             &metadata,
             &mut script_stdin,
             &mut state,
@@ -1614,6 +1689,7 @@ impl VirtualSession {
         args: Vec<String>,
         config: &SandboxConfig,
         cancel_flag: &AtomicBool,
+        extensions: Option<&dyn SandboxExtensions>,
         timeout_ms: Option<u64>,
         network_enabled: bool,
         env: BTreeMap<String, String>,
@@ -1641,6 +1717,7 @@ impl VirtualSession {
             command,
             config,
             cancel_flag,
+            extensions,
             timeout_ms,
             network_enabled,
             resolved_env,
@@ -1896,6 +1973,7 @@ impl VirtualSession {
         args: Vec<String>,
         config: &SandboxConfig,
         cancel_flag: &AtomicBool,
+        extensions: Option<&dyn SandboxExtensions>,
         timeout_ms: Option<u64>,
         network_enabled: bool,
         metadata: BTreeMap<String, String>,
@@ -1911,6 +1989,7 @@ impl VirtualSession {
             command,
             config,
             cancel_flag,
+            extensions,
             timeout_ms,
             network_enabled,
             env,
@@ -1928,6 +2007,7 @@ impl VirtualSession {
         args: Vec<String>,
         config: &SandboxConfig,
         cancel_flag: &AtomicBool,
+        extensions: Option<&dyn SandboxExtensions>,
         timeout_ms: Option<u64>,
         network_enabled: bool,
         metadata: BTreeMap<String, String>,
@@ -1952,6 +2032,7 @@ impl VirtualSession {
             command,
             config,
             cancel_flag,
+            extensions,
             nested_timeout,
             network_enabled,
             env,
@@ -2051,6 +2132,7 @@ impl VirtualSession {
         args: Vec<String>,
         config: &SandboxConfig,
         cancel_flag: &AtomicBool,
+        extensions: Option<&dyn SandboxExtensions>,
         timeout_ms: Option<u64>,
         network_enabled: bool,
         metadata: BTreeMap<String, String>,
@@ -2072,6 +2154,7 @@ impl VirtualSession {
             source,
             config,
             cancel_flag,
+            extensions,
             timeout_ms,
             network_enabled,
             metadata,
@@ -3497,6 +3580,7 @@ impl VirtualSession {
         stdin: Vec<u8>,
         config: &SandboxConfig,
         cancel_flag: &AtomicBool,
+        extensions: Option<&dyn SandboxExtensions>,
         timeout_ms: Option<u64>,
         network_enabled: bool,
         _env: BTreeMap<String, String>,
@@ -3521,6 +3605,7 @@ impl VirtualSession {
                 spec.command.clone(),
                 config,
                 cancel_flag,
+                extensions,
                 remaining_timeout_ms(timeout_ms, started)?,
                 network_enabled,
                 child_env,
@@ -4756,7 +4841,7 @@ mod tests {
     fn denies_non_allowlisted_commands() {
         let cancel = Arc::new(AtomicBool::new(false));
         let backend = create_session(memory_config()).unwrap();
-        let mut session = SandboxSession::new(memory_config(), backend, cancel);
+        let mut session = SandboxSession::new(memory_config(), backend, None, cancel);
         let result = session.run(ExecutionRequest {
             mode: ExecutionMode::Argv,
             argv: vec!["uname".to_string()],
@@ -4779,7 +4864,7 @@ mod tests {
     fn timeout_results_are_typed() {
         let cancel = Arc::new(AtomicBool::new(false));
         let backend = create_session(memory_config()).unwrap();
-        let mut session = SandboxSession::new(memory_config(), backend, cancel);
+        let mut session = SandboxSession::new(memory_config(), backend, None, cancel);
         let result = session.run(ExecutionRequest {
             mode: ExecutionMode::Argv,
             argv: vec!["sleep".to_string(), "0.05".to_string()],
@@ -4816,6 +4901,7 @@ mod tests {
                 },
                 &config,
                 cancel.as_ref(),
+                None,
             )
             .unwrap_err();
         assert_eq!(error.kind(), abash_core::ErrorKind::Cancellation);
@@ -4825,7 +4911,7 @@ mod tests {
     fn shell_commands_modify_memory_filesystem() {
         let cancel = Arc::new(AtomicBool::new(false));
         let backend = create_session(memory_config()).unwrap();
-        let mut session = SandboxSession::new(memory_config(), backend, cancel);
+        let mut session = SandboxSession::new(memory_config(), backend, None, cancel);
 
         let mkdir = session.run(ExecutionRequest {
             mode: ExecutionMode::Argv,
@@ -4895,7 +4981,7 @@ mod tests {
         };
         let cancel = Arc::new(AtomicBool::new(false));
         let backend = create_session(config.clone()).unwrap();
-        let mut session = SandboxSession::new(config, backend, cancel);
+        let mut session = SandboxSession::new(config, backend, None, cancel);
         let result = session.run(ExecutionRequest {
             mode: ExecutionMode::Argv,
             argv: vec!["cat".to_string(), "docs/demo.txt".to_string()],
