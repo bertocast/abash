@@ -21,6 +21,10 @@ static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 pub struct RuntimeCallbacks {
     pub event_callback: Option<Arc<Py<PyAny>>>,
     pub audit_callback: Option<Arc<Py<PyAny>>>,
+    pub custom_command_callback: Option<Arc<Py<PyAny>>>,
+    pub custom_command_names: std::collections::BTreeSet<String>,
+    pub pre_exec_hook: Option<Arc<Py<PyAny>>>,
+    pub post_exec_hook: Option<Arc<Py<PyAny>>>,
 }
 
 pub struct SandboxRuntime {
@@ -220,8 +224,7 @@ impl SandboxRuntime {
         thread::spawn(move || {
             run_state.set_status(RunStatus::Running);
             runtime.record_run_event(&run_state, RunEventKind::RunStarted, None, None, None, None);
-
-            let result = session.lock().run(request);
+            let result = runtime.execute_request(&session, request);
             let terminal_status = terminal_status(&result);
 
             if !result.stdout.is_empty() {
@@ -394,6 +397,10 @@ impl SandboxRuntime {
             callbacks: RuntimeCallbacks {
                 event_callback: self.callbacks.event_callback.clone(),
                 audit_callback: self.callbacks.audit_callback.clone(),
+                custom_command_callback: self.callbacks.custom_command_callback.clone(),
+                custom_command_names: self.callbacks.custom_command_names.clone(),
+                pre_exec_hook: self.callbacks.pre_exec_hook.clone(),
+                post_exec_hook: self.callbacks.post_exec_hook.clone(),
             },
             audit_log: self.audit_log.clone(),
             next_audit_sequence: self.next_audit_sequence.clone(),
@@ -462,6 +469,115 @@ struct ThreadRuntime {
 }
 
 impl ThreadRuntime {
+    fn execute_request(
+        &self,
+        session: &Arc<Mutex<SandboxSession>>,
+        request: ExecutionRequest,
+    ) -> ExecutionResult {
+        let effective_request = match self.apply_pre_exec_hook(&request) {
+            Ok(request) => request,
+            Err(error) => return ExecutionResult::failure(error, session.lock().base_metadata()),
+        };
+        let mut result = match self.run_custom_command(&effective_request) {
+            Ok(Some(result)) => result,
+            Ok(None) => session.lock().run(effective_request.clone()),
+            Err(error) => ExecutionResult::failure(error, session.lock().base_metadata()),
+        };
+        self.apply_post_exec_hook(&effective_request, &mut result);
+        result
+    }
+
+    fn run_custom_command(
+        &self,
+        request: &ExecutionRequest,
+    ) -> Result<Option<ExecutionResult>, SandboxError> {
+        if request.mode != abash_core::ExecutionMode::Argv {
+            return Ok(None);
+        }
+        let Some(command) = request.argv.first() else {
+            return Ok(None);
+        };
+        if !self.callbacks.custom_command_names.contains(command) {
+            return Ok(None);
+        }
+        let Some(callback) = self.callbacks.custom_command_callback.as_ref() else {
+            return Ok(None);
+        };
+        Python::with_gil(|py| -> Result<Option<ExecutionResult>, SandboxError> {
+            let request_payload =
+                crate::execution_request_to_python(py, request).map_err(python_callback_error)?;
+            let result_payload = callback
+                .bind(py)
+                .call1((request_payload,))
+                .map_err(python_callback_error)?;
+            let mut result = crate::python_to_execution_result(&result_payload)
+                .map_err(python_callback_error)?;
+            result
+                .metadata
+                .entry("backend".to_string())
+                .or_insert_with(|| "custom".to_string());
+            result
+                .metadata
+                .entry("command".to_string())
+                .or_insert_with(|| command.clone());
+            result
+                .metadata
+                .entry("profile".to_string())
+                .or_insert_with(|| self.profile.clone());
+            result
+                .metadata
+                .entry("filesystem_mode".to_string())
+                .or_insert_with(|| self.filesystem_mode.clone());
+            Ok(Some(result))
+        })
+    }
+
+    fn apply_pre_exec_hook(
+        &self,
+        request: &ExecutionRequest,
+    ) -> Result<ExecutionRequest, SandboxError> {
+        let Some(callback) = self.callbacks.pre_exec_hook.as_ref() else {
+            return Ok(request.clone());
+        };
+        Python::with_gil(|py| {
+            let payload =
+                crate::execution_request_to_python(py, request).map_err(python_callback_error)?;
+            let updated = callback
+                .bind(py)
+                .call1((payload,))
+                .map_err(python_callback_error)?;
+            if updated.is_none() {
+                return Ok(request.clone());
+            }
+            crate::python_to_execution_request(&updated).map_err(python_callback_error)
+        })
+    }
+
+    fn apply_post_exec_hook(&self, request: &ExecutionRequest, result: &mut ExecutionResult) {
+        let Some(callback) = self.callbacks.post_exec_hook.as_ref() else {
+            return;
+        };
+        Python::with_gil(|py| {
+            let request_payload = match crate::execution_request_to_python(py, request) {
+                Ok(payload) => payload,
+                Err(_) => return,
+            };
+            let result_payload = match crate::execution_result_to_python(py, result.clone()) {
+                Ok(payload) => payload,
+                Err(_) => return,
+            };
+            let Ok(updated) = callback.bind(py).call1((request_payload, result_payload)) else {
+                return;
+            };
+            if updated.is_none() {
+                return;
+            }
+            if let Ok(next) = crate::python_to_execution_result(&updated) {
+                *result = next;
+            }
+        });
+    }
+
     fn record_run_event(
         &self,
         run: &RunState,
@@ -520,6 +636,10 @@ impl ThreadRuntime {
                 .call1((crate::audit_event_to_python(py, &audit),));
         });
     }
+}
+
+fn python_callback_error(error: PyErr) -> SandboxError {
+    SandboxError::BackendFailure(format!("python callback failed: {error}"))
 }
 
 fn default_event_metadata(

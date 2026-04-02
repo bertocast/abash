@@ -129,6 +129,13 @@ class BashOptions:
     network_policy: NetworkPolicy | None = None
     event_callback: Callable[["RunEvent"], None] | None = None
     audit_callback: Callable[["AuditEvent"], None] | None = None
+    custom_commands: dict[
+        str, Callable[["ExecutionRequest"], "ExecutionResult | str | bytes"]
+    ] = field(default_factory=dict)
+    pre_exec_hook: Callable[["ExecutionRequest"], "ExecutionRequest | None"] | None = None
+    post_exec_hook: Callable[
+        ["ExecutionRequest", "ExecutionResult"], "ExecutionResult | None"
+    ] | None = None
 
 
 @dataclass(slots=True)

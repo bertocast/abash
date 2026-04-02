@@ -36,6 +36,7 @@ The current implementation provides:
 - in-process detached execution through `Bash.exec_detached()`
 - buffered `BashRun` inspection for status, wait, cancel, stdout/stderr/output, and retained events
 - buffered session audit records plus optional event/audit callbacks
+- argv-mode custom command registration plus top-level pre/post execution hooks
 - script execution through `Bash.exec_script()` and `Bash.exec_detached_script()`, including optional script `argv`
 - safe shell composition for `|`, `<`, `>`, `>>`, `;`, `&&`, and `||`
 
@@ -88,6 +89,13 @@ Command-name parity work is tracked in [docs/pending_commands.md](docs/pending_c
 - Output is buffered; there is no live streaming guarantee in Phase 4 v1.
 - Only one active run is allowed per `Bash` session.
 - `Bash(session_state="per_exec")` opts into `just-bash`-style shell-state reset between calls while keeping the filesystem shared.
+
+## Extension Surface
+
+- `Bash(custom_commands={...})` registers host-side argv-mode commands that return normal `ExecutionResult` payloads.
+- `pre_exec_hook` can rewrite top-level requests before dispatch.
+- `post_exec_hook` can observe or replace top-level results after dispatch.
+- Both hooks are intentionally narrow; they operate on the top-level request/result boundary, not on the internal script AST.
 
 ## Script Compatibility
 

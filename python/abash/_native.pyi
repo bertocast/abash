@@ -12,6 +12,10 @@ class NativeSandbox:
         network_policy_json: str | None = None,
         event_callback: object | None = None,
         audit_callback: object | None = None,
+        custom_command_names: list[str] | None = None,
+        custom_command_callback: object | None = None,
+        pre_exec_hook: object | None = None,
+        post_exec_hook: object | None = None,
     ) -> None: ...
     def run(
         self,

@@ -40,7 +40,11 @@ impl NativeSandbox {
         writable_roots=None,
         network_policy_json=None,
         event_callback=None,
-        audit_callback=None
+        audit_callback=None,
+        custom_command_names=None,
+        custom_command_callback=None,
+        pre_exec_hook=None,
+        post_exec_hook=None
     ))]
     fn new(
         profile: String,
@@ -52,6 +56,10 @@ impl NativeSandbox {
         network_policy_json: Option<String>,
         event_callback: Option<Py<PyAny>>,
         audit_callback: Option<Py<PyAny>>,
+        custom_command_names: Option<Vec<String>>,
+        custom_command_callback: Option<Py<PyAny>>,
+        pre_exec_hook: Option<Py<PyAny>>,
+        post_exec_hook: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         let profile = parse_profile(&profile)?;
         let filesystem_mode = parse_filesystem_mode(&filesystem_mode)?;
@@ -93,6 +101,13 @@ impl NativeSandbox {
             RuntimeCallbacks {
                 event_callback: event_callback.map(Arc::new),
                 audit_callback: audit_callback.map(Arc::new),
+                custom_command_callback: custom_command_callback.map(Arc::new),
+                custom_command_names: custom_command_names
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                pre_exec_hook: pre_exec_hook.map(Arc::new),
+                post_exec_hook: post_exec_hook.map(Arc::new),
             },
         ));
 
@@ -377,6 +392,30 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+pub(crate) fn execution_request_to_python(
+    py: Python<'_>,
+    request: &ExecutionRequest,
+) -> PyResult<Py<PyAny>> {
+    let payload = PyDict::new_bound(py);
+    payload.set_item(
+        "mode",
+        match request.mode {
+            ExecutionMode::Argv => "argv",
+            ExecutionMode::Script => "script",
+        },
+    )?;
+    payload.set_item("argv", request.argv.clone())?;
+    payload.set_item("script", request.script.clone())?;
+    payload.set_item("cwd", request.cwd.clone())?;
+    payload.set_item("env", request.env.clone())?;
+    payload.set_item("stdin", PyBytes::new_bound(py, &request.stdin))?;
+    payload.set_item("timeout_ms", request.timeout_ms)?;
+    payload.set_item("network_enabled", request.network_enabled)?;
+    payload.set_item("filesystem_mode", request.filesystem_mode.as_str())?;
+    payload.set_item("metadata", request.metadata.clone())?;
+    Ok(payload.into_any().unbind())
+}
+
 fn build_backend(config: &SandboxConfig) -> PyResult<Box<dyn SessionBackend>> {
     match config.profile {
         ExecutionProfile::Safe | ExecutionProfile::Workspace => {
@@ -464,7 +503,7 @@ fn to_py_err(error: SandboxError) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
 
-fn execution_result_to_python(
+pub(crate) fn execution_result_to_python(
     py: Python<'_>,
     result: abash_core::ExecutionResult,
 ) -> PyResult<Py<PyAny>> {
@@ -489,6 +528,103 @@ fn execution_result_to_python(
         payload.set_item("error", py.None())?;
     }
     Ok(payload.into_any().unbind())
+}
+
+pub(crate) fn python_to_execution_request(
+    payload: &Bound<'_, PyAny>,
+) -> PyResult<ExecutionRequest> {
+    let mode = payload.get_item("mode")?.extract::<String>()?;
+    let filesystem_mode = payload.get_item("filesystem_mode")?.extract::<String>()?;
+    let stdin = payload.get_item("stdin")?.extract::<Vec<u8>>()?;
+    Ok(ExecutionRequest {
+        mode: parse_execution_mode(&mode)?,
+        argv: payload.get_item("argv")?.extract::<Vec<String>>()?,
+        script: payload.get_item("script")?.extract::<Option<String>>()?,
+        cwd: payload
+            .get_item("cwd")?
+            .extract::<Option<String>>()?
+            .unwrap_or_default(),
+        env: payload
+            .get_item("env")?
+            .extract::<BTreeMap<String, String>>()?,
+        stdin,
+        timeout_ms: payload.get_item("timeout_ms")?.extract::<Option<u64>>()?,
+        network_enabled: payload
+            .get_item("network_enabled")?
+            .extract::<Option<bool>>()?
+            .unwrap_or(false),
+        filesystem_mode: parse_filesystem_mode(&filesystem_mode)?,
+        metadata: payload
+            .get_item("metadata")?
+            .extract::<BTreeMap<String, String>>()?,
+    })
+}
+
+pub(crate) fn python_to_execution_result(
+    payload: &Bound<'_, PyAny>,
+) -> PyResult<abash_core::ExecutionResult> {
+    let stdout_value = payload.get_item("stdout")?;
+    let stdout = if let Ok(text) = stdout_value.extract::<String>() {
+        text.into_bytes()
+    } else {
+        stdout_value.extract::<Vec<u8>>()?
+    };
+    let stderr_value = payload.get_item("stderr")?;
+    let stderr = if let Ok(text) = stderr_value.extract::<String>() {
+        text.into_bytes()
+    } else {
+        stderr_value.extract::<Vec<u8>>()?
+    };
+    let error_payload = payload.get_item("error")?;
+    let error = if error_payload.is_none() {
+        None
+    } else {
+        let kind = error_payload.get_item("kind")?.extract::<String>()?;
+        let message = error_payload.get_item("message")?.extract::<String>()?;
+        Some(abash_core::SanitizedError {
+            kind: match kind.as_str() {
+                "policy_denied" => abash_core::ErrorKind::PolicyDenied,
+                "timeout" => abash_core::ErrorKind::Timeout,
+                "cancellation" => abash_core::ErrorKind::Cancellation,
+                "unsupported_feature" => abash_core::ErrorKind::UnsupportedFeature,
+                "internal_error" => abash_core::ErrorKind::InternalError,
+                "backend_failure" => abash_core::ErrorKind::BackendFailure,
+                "invalid_request" => abash_core::ErrorKind::InvalidRequest,
+                "closed_session" => abash_core::ErrorKind::ClosedSession,
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "unsupported error kind: {other}"
+                    )))
+                }
+            },
+            message,
+        })
+    };
+    let termination_reason = payload
+        .get_item("termination_reason")?
+        .extract::<String>()?;
+    Ok(abash_core::ExecutionResult {
+        stdout,
+        stderr,
+        exit_code: payload.get_item("exit_code")?.extract::<i32>()?,
+        termination_reason: match termination_reason.as_str() {
+            "exited" => abash_core::TerminationReason::Exited,
+            "timeout" => abash_core::TerminationReason::Timeout,
+            "cancelled" => abash_core::TerminationReason::Cancelled,
+            "denied" => abash_core::TerminationReason::Denied,
+            "unsupported" => abash_core::TerminationReason::Unsupported,
+            "failed" => abash_core::TerminationReason::Failed,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unsupported termination reason: {other}"
+                )))
+            }
+        },
+        error,
+        metadata: payload
+            .get_item("metadata")?
+            .extract::<BTreeMap<String, String>>()?,
+    })
 }
 
 pub(crate) fn run_event_to_python(py: Python<'_>, event: &RunEvent) -> Py<PyAny> {

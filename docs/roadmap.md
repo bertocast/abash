@@ -111,22 +111,18 @@ Rationale:
 
 ## Extension Surface
 
-`just-bash` exposes two major developer-facing surfaces that `abash` does not yet match:
+`abash` now exposes the smaller extension layer that makes the most sense for embedders:
 
-- custom command registration
-- AST transform plugins
+- argv-mode custom command registration
+- top-level pre/post execution hooks
 
-These are not polish items. They change how embedders extend and instrument the system.
+Status:
 
-Recommended order:
+- custom command registration: landed
+- lightweight execution hooks: landed
+- AST rewrite plugins remain intentionally out of scope for now; the current hook boundary is enough for request/result instrumentation without committing to a script-transform API
 
-1. custom command registration
-2. lightweight execution hooks or transform pipeline
-
-Rationale:
-
-- custom commands have immediate value for embedders
-- transform infrastructure should follow only if there is a clear instrumentation use case
+Next focus: no active extension-surface roadmap items.
 
 ## Network Work
 

@@ -14,6 +14,7 @@ import pytest
 from abash import (
     AuditEvent,
     Bash,
+    ExecutionRequest,
     RunEvent,
     ErrorKind,
     ExecutionProfile,
@@ -23,6 +24,7 @@ from abash import (
     NetworkPolicy,
     RunStatus,
     SessionState,
+    TerminationReason,
 )
 
 
@@ -2038,6 +2040,54 @@ async def test_close_fails_while_active_run_exists() -> None:
 
         run.cancel()
         await run.wait()
+
+
+@pytest.mark.anyio
+async def test_custom_commands_support_exec_and_detached_runs() -> None:
+    def upper(request: ExecutionRequest) -> ExecutionResult:
+        return ExecutionResult(
+            stdout=f"{' '.join(request.argv[1:]).upper()}\n",
+            stderr="",
+            exit_code=0,
+            termination_reason=TerminationReason.EXITED,
+            metadata={"custom_command": request.argv[0]},
+        )
+
+    async with Bash(custom_commands={"upper": upper}) as bash:
+        direct = await bash.exec(["upper", "bert", "core"])
+        run = await bash.exec_detached(["upper", "ana"])
+        detached = await run.wait()
+
+    assert direct.stdout == "BERT CORE\n"
+    assert direct.metadata["backend"] == "custom"
+    assert direct.metadata["custom_command"] == "upper"
+    assert detached.stdout == "ANA\n"
+    assert detached.metadata["backend"] == "custom"
+
+
+@pytest.mark.anyio
+async def test_exec_hooks_can_transform_requests_and_results() -> None:
+    def pre_exec(request: ExecutionRequest) -> ExecutionRequest:
+        request.argv = ["echo", "patched"]
+        request.metadata["from_hook"] = "pre"
+        return request
+
+    def post_exec(request: ExecutionRequest, result: ExecutionResult) -> ExecutionResult:
+        return ExecutionResult(
+            stdout=result.stdout + "post\n",
+            stderr=result.stderr,
+            exit_code=result.exit_code,
+            termination_reason=result.termination_reason,
+            error=result.error,
+            metadata={**result.metadata, **request.metadata, "post_hook": "yes"},
+        )
+
+    async with Bash(pre_exec_hook=pre_exec, post_exec_hook=post_exec) as bash:
+        result = await bash.exec(["echo", "original"])
+
+    assert result.stdout == "patched\npost\n"
+    assert result.metadata["from_hook"] == "pre"
+    assert result.metadata["post_hook"] == "yes"
 
 
 @pytest.mark.anyio

@@ -71,6 +71,19 @@ class _NativeAuditEventPayload(TypedDict):
     reason: str | None
 
 
+class _NativeRequestPayload(TypedDict):
+    mode: str
+    argv: list[str]
+    script: str | None
+    cwd: str
+    env: dict[str, str]
+    stdin: bytes
+    timeout_ms: int | None
+    network_enabled: bool
+    filesystem_mode: str
+    metadata: dict[str, str]
+
+
 def _timestamp_from_ms(timestamp_ms: int) -> datetime:
     return datetime.fromtimestamp(timestamp_ms / 1_000, tz=UTC)
 
@@ -119,6 +132,54 @@ def _coerce_result(payload: dict[str, object]) -> ExecutionResult:
         error=error,
         metadata=dict(typed_payload.get("metadata", {})),
     )
+
+
+def _coerce_request(payload: dict[str, object]) -> ExecutionRequest:
+    typed_payload = cast(_NativeRequestPayload, payload)
+    return ExecutionRequest(
+        mode=ExecutionMode(str(typed_payload["mode"])),
+        argv=list(typed_payload.get("argv", [])),
+        script=typed_payload.get("script"),
+        cwd=str(typed_payload.get("cwd", "")),
+        env=dict(typed_payload.get("env", {})),
+        stdin=bytes(typed_payload.get("stdin", b"")),
+        timeout_ms=typed_payload.get("timeout_ms"),
+        filesystem_mode=FilesystemMode(str(typed_payload["filesystem_mode"])),
+        network_enabled=bool(typed_payload.get("network_enabled", False)),
+        metadata=dict(typed_payload.get("metadata", {})),
+    )
+
+
+def _result_to_payload(result: ExecutionResult | str | bytes) -> dict[str, object]:
+    if isinstance(result, str):
+        result = ExecutionResult(
+            stdout=result,
+            stderr="",
+            exit_code=0,
+            termination_reason=TerminationReason.EXITED,
+        )
+    elif isinstance(result, bytes):
+        result = ExecutionResult(
+            stdout=result.decode("utf-8"),
+            stderr="",
+            exit_code=0,
+            termination_reason=TerminationReason.EXITED,
+        )
+
+    error_payload: dict[str, str] | None = None
+    if result.error is not None:
+        error_payload = {
+            "kind": result.error.kind.value,
+            "message": result.error.message,
+        }
+    return {
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "exit_code": result.exit_code,
+        "termination_reason": result.termination_reason.value,
+        "error": error_payload,
+        "metadata": dict(result.metadata),
+    }
 
 
 def _coerce_run_event(payload: dict[str, object]) -> RunEvent:
@@ -209,6 +270,68 @@ def _wrap_audit_callback(
     return _bridge
 
 
+def _wrap_custom_command_callback(
+    callbacks: dict[str, Callable[[ExecutionRequest], ExecutionResult | str | bytes]] | None,
+) -> Callable[[dict[str, object]], dict[str, object]] | None:
+    if not callbacks:
+        return None
+
+    def _bridge(payload: dict[str, object]) -> dict[str, object]:
+        request = _coerce_request(payload)
+        command = request.argv[0] if request.argv else ""
+        callback = callbacks[command]
+        return _result_to_payload(callback(request))
+
+    return _bridge
+
+
+def _wrap_pre_exec_hook(
+    callback: Callable[[ExecutionRequest], ExecutionRequest | None] | None,
+) -> Callable[[dict[str, object]], dict[str, object] | None] | None:
+    if callback is None:
+        return None
+
+    def _bridge(payload: dict[str, object]) -> dict[str, object] | None:
+        request = _coerce_request(payload)
+        updated = callback(request)
+        if updated is None:
+            return None
+        return {
+            "mode": updated.mode.value,
+            "argv": list(updated.argv or []),
+            "script": updated.script,
+            "cwd": updated.cwd or "",
+            "env": dict(updated.env),
+            "stdin": updated.stdin_bytes() or b"",
+            "timeout_ms": updated.timeout_ms,
+            "network_enabled": updated.network_enabled,
+            "filesystem_mode": (updated.filesystem_mode or FilesystemMode.MEMORY).value,
+            "metadata": dict(updated.metadata),
+        }
+
+    return _bridge
+
+
+def _wrap_post_exec_hook(
+    callback: Callable[[ExecutionRequest, ExecutionResult], ExecutionResult | None] | None,
+) -> Callable[[dict[str, object], dict[str, object]], dict[str, object] | None] | None:
+    if callback is None:
+        return None
+
+    def _bridge(
+        request_payload: dict[str, object],
+        result_payload: dict[str, object],
+    ) -> dict[str, object] | None:
+        request = _coerce_request(request_payload)
+        result = _coerce_result(result_payload)
+        updated = callback(request, result)
+        if updated is None:
+            return None
+        return _result_to_payload(updated)
+
+    return _bridge
+
+
 class BashRun:
     def __init__(self, native: NativeRun) -> None:
         self._native = native
@@ -260,6 +383,15 @@ class Bash:
         network_policy: NetworkPolicy | None = None,
         event_callback: Callable[[RunEvent], None] | None = None,
         audit_callback: Callable[[AuditEvent], None] | None = None,
+        custom_commands: dict[
+            str, Callable[[ExecutionRequest], ExecutionResult | str | bytes]
+        ]
+        | None = None,
+        pre_exec_hook: Callable[[ExecutionRequest], ExecutionRequest | None] | None = None,
+        post_exec_hook: Callable[
+            [ExecutionRequest, ExecutionResult], ExecutionResult | None
+        ]
+        | None = None,
         options: BashOptions | None = None,
     ) -> None:
         options = options or BashOptions(
@@ -272,10 +404,16 @@ class Bash:
             network_policy=network_policy,
             event_callback=event_callback,
             audit_callback=audit_callback,
+            custom_commands=dict(custom_commands or {}),
+            pre_exec_hook=pre_exec_hook,
+            post_exec_hook=post_exec_hook,
         )
         commands = list(options.allowlisted_commands or default_allowlisted_commands())
         self._event_callback_bridge = _wrap_event_callback(options.event_callback)
         self._audit_callback_bridge = _wrap_audit_callback(options.audit_callback)
+        self._custom_command_bridge = _wrap_custom_command_callback(options.custom_commands)
+        self._pre_exec_hook_bridge = _wrap_pre_exec_hook(options.pre_exec_hook)
+        self._post_exec_hook_bridge = _wrap_post_exec_hook(options.post_exec_hook)
         self._native = NativeSandbox(
             options.profile.value,
             options.filesystem_mode.value,
@@ -286,6 +424,10 @@ class Bash:
             _network_policy_json(options.network_policy),
             self._event_callback_bridge,
             self._audit_callback_bridge,
+            sorted(options.custom_commands),
+            self._custom_command_bridge,
+            self._pre_exec_hook_bridge,
+            self._post_exec_hook_bridge,
         )
         self.options = BashOptions(
             profile=options.profile,
@@ -297,6 +439,9 @@ class Bash:
             network_policy=options.network_policy,
             event_callback=options.event_callback,
             audit_callback=options.audit_callback,
+            custom_commands=dict(options.custom_commands),
+            pre_exec_hook=options.pre_exec_hook,
+            post_exec_hook=options.post_exec_hook,
         )
         self._closed = False
 
@@ -313,6 +458,15 @@ class Bash:
         network_policy: NetworkPolicy | None = None,
         event_callback: Callable[[RunEvent], None] | None = None,
         audit_callback: Callable[[AuditEvent], None] | None = None,
+        custom_commands: dict[
+            str, Callable[[ExecutionRequest], ExecutionResult | str | bytes]
+        ]
+        | None = None,
+        pre_exec_hook: Callable[[ExecutionRequest], ExecutionRequest | None] | None = None,
+        post_exec_hook: Callable[
+            [ExecutionRequest, ExecutionResult], ExecutionResult | None
+        ]
+        | None = None,
     ) -> "Bash":
         return cls(
             profile=profile,
@@ -324,6 +478,9 @@ class Bash:
             network_policy=network_policy,
             event_callback=event_callback,
             audit_callback=audit_callback,
+            custom_commands=custom_commands,
+            pre_exec_hook=pre_exec_hook,
+            post_exec_hook=post_exec_hook,
         )
 
     async def exec_detached(
