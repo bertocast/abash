@@ -31,7 +31,7 @@
 - command-local assignment prefixes (`FOO=bar cmd`): supported
 - `$NAME`, `${NAME}`, `${NAME:-default}`, `$1`, `$2`, `$@`, and `$#` expansion: supported in script mode
 - argument globbing with `*`, `?`, and bracket classes: supported in script mode
-- literal `grep` with `-n` / `-v`: supported
+- regex-aware `grep` with optional `-E`, `-F`, `-i`, `-n`, `-v`, `-c`, `-l`, and `-r`: supported
 - aggregate `wc` with `-l`, `-w`, `-c`: supported
 - lexical line `sort` with optional `-r`: supported
 - adjacent-line `uniq` with optional `-c`: supported
@@ -73,8 +73,8 @@
 - narrow host-backed `python3` with `-c`, `-m`, script-file, `stdin`, and workspace file sync: supported
 - narrow host-backed `js-exec` with `-c`, script-file, `stdin`, and workspace file sync: supported
 - narrow `xan` CSV toolkit with `headers`, `count`, `select`, `search`, `sort`, and `filter`: supported
-- `egrep` alias to narrow `grep`: supported
-- `fgrep` alias to narrow `grep`: supported
+- `egrep` alias to current regex `grep`: supported
+- `fgrep` alias to current fixed-string `grep`: supported
 - narrow `find` with path roots plus `-name`, `-type`, and `-maxdepth`: supported
 - narrow `ls` with immediate listings plus optional `-a` and `-l`: supported
 - narrow `rev`, `nl`, and `tac`: supported

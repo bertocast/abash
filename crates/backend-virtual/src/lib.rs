@@ -17,6 +17,7 @@ mod ducmd;
 mod envcmd;
 mod exprcmd;
 mod find;
+mod grepcmd;
 mod gzipcmd;
 mod hashcmd;
 mod hostexec;
@@ -1001,6 +1002,9 @@ impl VirtualSession {
     ) -> Result<Vec<String>, SandboxError> {
         if command_name != "find"
             && command_name != "rg"
+            && command_name != "grep"
+            && command_name != "egrep"
+            && command_name != "fgrep"
             && command_name != "jq"
             && command_name != "yq"
             && command_name != "sqlite3"
@@ -1017,12 +1021,15 @@ impl VirtualSession {
         let candidates = self.filesystem.list_paths()?;
         let mut literal_next = false;
         let mut rg_pattern_consumed = command_name != "rg";
+        let mut grep_pattern_consumed =
+            command_name != "grep" && command_name != "egrep" && command_name != "fgrep";
         let mut jq_filter_consumed = command_name != "jq";
         let mut yq_filter_consumed = command_name != "yq";
         let mut yq_option_value_expected = false;
         let mut sqlite3_option_value_expected = false;
         let mut sqlite3_database_consumed = command_name != "sqlite3";
         let mut sqlite3_sql_consumed = command_name != "sqlite3";
+        let mut grep_flags_done = false;
 
         for arg in args {
             if literal_next {
@@ -1056,6 +1063,23 @@ impl VirtualSession {
                 }
                 expanded.push(arg.clone());
                 rg_pattern_consumed = true;
+                continue;
+            }
+
+            if (command_name == "grep" || command_name == "egrep" || command_name == "fgrep")
+                && !grep_pattern_consumed
+            {
+                if !grep_flags_done && arg == "--" {
+                    expanded.push(arg.clone());
+                    grep_flags_done = true;
+                    continue;
+                }
+                if !grep_flags_done && arg.starts_with('-') && arg != "-" {
+                    expanded.push(arg.clone());
+                    continue;
+                }
+                expanded.push(arg.clone());
+                grep_pattern_consumed = true;
                 continue;
             }
 
@@ -1724,53 +1748,18 @@ impl VirtualSession {
         stdin: Vec<u8>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
-        let mut numbered = false;
-        let mut inverted = false;
-        let mut index = 0usize;
-        while let Some(flag) = args.get(index) {
-            match flag.as_str() {
-                "-n" => numbered = true,
-                "-v" => inverted = true,
-                "-E" => {}
-                "-F" => {}
-                _ if flag.starts_with('-') => {
-                    return Err(SandboxError::InvalidRequest(format!(
-                        "grep flag is not supported: {flag}"
-                    )));
-                }
-                _ => break,
-            }
-            index += 1;
-        }
-
-        let Some(pattern) = args.get(index) else {
-            return Err(SandboxError::InvalidRequest(
-                "grep requires a literal pattern".to_string(),
-            ));
-        };
-        let contents = self.read_command_inputs(cwd, &args[index + 1..], stdin)?;
-        let input = String::from_utf8_lossy(&contents);
-        let mut matched = Vec::new();
-
-        for (line_number, line) in input.lines().enumerate() {
-            let is_match = line.contains(pattern);
-            if is_match != inverted {
-                if numbered {
-                    matched.push(format!("{}:{line}", line_number + 1));
-                } else {
-                    matched.push(line.to_string());
-                }
-            }
-        }
-
+        let result = grepcmd::execute(
+            cwd,
+            &args,
+            stdin,
+            |path| self.filesystem.read_file(path),
+            || self.filesystem.list_paths(),
+            |path| self.filesystem.is_dir(path),
+        )?;
         Ok(ExecutionResult {
-            stdout: if matched.is_empty() {
-                Vec::new()
-            } else {
-                format!("{}\n", matched.join("\n")).into_bytes()
-            },
-            stderr: Vec::new(),
-            exit_code: if matched.is_empty() { 1 } else { 0 },
+            stdout: result.output,
+            stderr: result.stderr,
+            exit_code: result.exit_code,
             termination_reason: TerminationReason::Exited,
             error: None,
             metadata,

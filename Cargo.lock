@@ -17,6 +17,7 @@ dependencies = [
  "base64",
  "flate2",
  "md-5",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

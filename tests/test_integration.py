@@ -255,6 +255,49 @@ async def test_argv_mode_text_builtins_support_stdin_and_exit_codes() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_grep_supports_regex_fixed_case_and_count() -> None:
+    async with Bash() as bash:
+        regex_result = await bash.exec(["grep", "-in", "be.a"], stdin="Alpha\nBETA\nbeta\n")
+        fixed_result = await bash.exec(["fgrep", "-i", "be.a"], stdin="be.a\nbeta\n")
+        count_result = await bash.exec(
+            ["grep", "-c", "warn"],
+            stdin="warn\nok\nwarn\n",
+        )
+
+    assert regex_result.exit_code == 0
+    assert regex_result.stdout == "2:BETA\n3:beta\n"
+    assert fixed_result.exit_code == 0
+    assert fixed_result.stdout == "be.a\n"
+    assert count_result.exit_code == 0
+    assert count_result.stdout == "2\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_grep_supports_recursive_search_and_file_reporting() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/src/nested", parents=True)
+        await bash.write_file("/workspace/src/app.txt", "alpha\nbeta\n")
+        await bash.write_file("/workspace/src/nested/lib.txt", "beta\n")
+        await bash.write_file("/workspace/src/nested/skip.txt", "gamma\n")
+
+        recursive_result = await bash.exec(["grep", "-rn", "be.a", "/workspace/src"])
+        listed_result = await bash.exec(["grep", "-rl", "beta", "/workspace/src"])
+        counted_result = await bash.exec(
+            ["grep", "-rc", "beta", "/workspace/src/app.txt", "/workspace/src/nested/lib.txt"],
+        )
+
+    assert recursive_result.exit_code == 0
+    assert recursive_result.stdout == (
+        "/workspace/src/app.txt:2:beta\n"
+        "/workspace/src/nested/lib.txt:1:beta\n"
+    )
+    assert listed_result.exit_code == 0
+    assert listed_result.stdout == "/workspace/src/app.txt\n/workspace/src/nested/lib.txt\n"
+    assert counted_result.exit_code == 0
+    assert counted_result.stdout == "/workspace/src/app.txt:1\n/workspace/src/nested/lib.txt:1\n"
+
+
+@pytest.mark.anyio
 async def test_script_mode_text_builtins_support_pipelines_and_files() -> None:
     async with Bash() as bash:
         await bash.write_file("/workspace/text.txt", "pear\napple\npear\nbanana\n")
@@ -286,6 +329,16 @@ async def test_script_mode_grep_works_inside_if_control_flow() -> None:
 
     assert result.exit_code == 0
     assert result.stdout == "beta\nhit\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_grep_keeps_pattern_args_literal_before_file_globbing() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/patterns.txt", "*.rs\nmain.rs\n")
+        result = await bash.exec_script("grep -F '*.rs' /workspace/patterns.txt")
+
+    assert result.exit_code == 0
+    assert result.stdout == "*.rs\n"
 
 
 @pytest.mark.anyio

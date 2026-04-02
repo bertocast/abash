@@ -63,7 +63,7 @@ Many commands now exist by name in both projects, but `just-bash` is still broad
 
 Highest-priority work:
 
-- `grep`: regex, recursive modes, richer flags
+- `ln`: hard-link support
 - `awk`: broader language surface
 - `jq`: larger filter language and builtin coverage
 - `yq`: more formats and broader transcoding surface
@@ -71,7 +71,7 @@ Highest-priority work:
 
 Recommended order:
 
-1. `grep`
+1. `ln` hard links
 2. `jq`
 3. `yq`
 4. `xan`
@@ -79,7 +79,7 @@ Recommended order:
 
 Rationale:
 
-- `grep` is common and still very narrow in `abash`
+- `grep` work is landed; next concrete command-behavior mismatch is hard-link support in `ln`
 - `jq` and `yq` affect high-value agent data workflows
 - `xan` and `awk` are larger interpreter-style expansions and should follow clearer wins
 
@@ -158,7 +158,7 @@ Recommended order:
 
 If the goal is to move closer to `just-bash` with high payoff and controlled scope:
 
-1. `grep` depth
-2. hard links in `ln`
-3. execution-state decision
-4. custom command registration
+1. hard links in `ln`
+2. execution-state decision
+3. custom command registration
+4. `jq` depth
