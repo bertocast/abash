@@ -546,6 +546,28 @@ async def test_argv_mode_jq_supports_compact_slurp_and_exit_status() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_jq_supports_construction_builtins_and_operators() -> None:
+    async with Bash() as bash:
+        builtins = await bash.exec(
+            ["jq", "-c", "{keys: keys, len: (.items | length), ok: has(\"name\")}"],
+            stdin='{"name":"bert","items":[1,2,3],"z":1}\n',
+        )
+        mapping = await bash.exec(
+            ["jq", "-c", "[.[] | select(. > 2)] | map(. * 10)"],
+            stdin="[1,2,3,4]\n",
+        )
+        fallback = await bash.exec(
+            ["jq", "-r", ".missing // \"fallback\""],
+            stdin='{"name":"bert"}\n',
+        )
+
+    assert builtins.exit_code == 0
+    assert builtins.stdout == '{"keys":["items","name","z"],"len":3,"ok":true}\n'
+    assert mapping.stdout == "[30.0,40.0]\n"
+    assert fallback.stdout == "fallback\n"
+
+
+@pytest.mark.anyio
 async def test_argv_mode_yq_reads_yaml_and_can_emit_json() -> None:
     async with Bash() as bash:
         await bash.write_file(
@@ -558,6 +580,18 @@ async def test_argv_mode_yq_reads_yaml_and_can_emit_json() -> None:
     assert host.exit_code == 0
     assert host.stdout == "localhost\n"
     assert config.stdout == '{"host":"localhost","port":5432}\n'
+
+
+@pytest.mark.anyio
+async def test_argv_mode_yq_inherits_expanded_jq_filter_surface() -> None:
+    async with Bash() as bash:
+        result = await bash.exec(
+            ["yq", "-o", "json", "-c", "{name, count: (.items | length)}"],
+            stdin="name: bert\nitems:\n  - a\n  - b\n",
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == '{"count":2,"name":"bert"}\n'
 
 
 @pytest.mark.anyio

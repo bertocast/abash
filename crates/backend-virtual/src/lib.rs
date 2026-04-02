@@ -23,6 +23,7 @@ mod hashcmd;
 mod hostexec;
 mod htmltomarkdown;
 mod jq;
+mod jq_engine;
 mod jsexeccmd;
 mod ls;
 mod mv;

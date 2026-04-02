@@ -63,8 +63,8 @@
 - narrow `file` detection for symlink/directory/empty/text/data: supported
 - narrow `readlink` with sanitized workspace-relative targets: supported
 - narrow `ln` with hard links by default plus `-s`, optional `-f`, `-n`, and `-v`: supported
-- narrow `jq` with `.`, `.key`, `.[index]`, `.[start:end]`, `.[]`, `|`, `,`, and `-r` / `-c` / `-e` / `-s` / `-n`: supported
-- narrow `yq` with YAML default input/output, optional `-p json`, `-o json`, and jq-lite filters: supported
+- narrow `jq` with paths, pipes, commas, literals, array/object construction, `select`, `map`, `length`, `type`, `keys`, `has`, `//`, comparisons, and basic arithmetic, plus `-r` / `-c` / `-e` / `-s` / `-n`: supported
+- narrow `yq` with YAML default input/output, optional `-p json`, `-o json`, and the current jq-lite filter surface: supported
 - narrow `sqlite3` with `:memory:` or file-backed databases, SQL from arg or stdin, and `-json` / `-csv` / `-header`: supported
 - narrow `gzip` with stdin/stdout plus `-c` / `-d` / `-k` / `-f` / `-S`: supported
 - narrow `gunzip` as `gzip -d`: supported
