@@ -751,6 +751,63 @@ async def test_argv_mode_js_exec_syncs_workspace_mutations_back() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_xan_headers_and_count() -> None:
+    async with Bash() as bash:
+        await bash.write_file(
+            "/workspace/data.csv",
+            "name,age,city,vec_1,vec_2\nbert,32,madrid,1,2\nana,28,porto,3,4\n",
+        )
+        headers = await bash.exec(["xan", "headers", "-j", "/workspace/data.csv"])
+        count = await bash.exec(["xan", "count", "/workspace/data.csv"])
+
+    assert headers.exit_code == 0
+    assert headers.stdout == "name\nage\ncity\nvec_1\nvec_2\n"
+    assert count.exit_code == 0
+    assert count.stdout == "2\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_xan_select_search_sort_and_filter() -> None:
+    async with Bash() as bash:
+        await bash.write_file(
+            "/workspace/data.csv",
+            "name,age,city,vec_1,vec_2\nbert,32,madrid,1,2\nana,28,porto,3,4\nzoe,41,rome,5,6\n",
+        )
+        selected = await bash.exec(["xan", "select", "name,vec_*", "/workspace/data.csv"])
+        searched = await bash.exec(
+            ["xan", "search", "-s", "city", "^m", "/workspace/data.csv"]
+        )
+        sorted_result = await bash.exec(
+            ["xan", "sort", "-s", "age", "-N", "-R", "/workspace/data.csv"]
+        )
+        filtered = await bash.exec(["xan", "filter", "age > 30", "/workspace/data.csv"])
+
+    assert selected.exit_code == 0
+    assert selected.stdout == "name,vec_1,vec_2\nbert,1,2\nana,3,4\nzoe,5,6\n"
+    assert searched.exit_code == 0
+    assert searched.stdout == "name,age,city,vec_1,vec_2\nbert,32,madrid,1,2\n"
+    assert sorted_result.exit_code == 0
+    assert sorted_result.stdout.startswith("name,age,city,vec_1,vec_2\nzoe,41,rome,5,6\n")
+    assert filtered.exit_code == 0
+    assert filtered.stdout == (
+        "name,age,city,vec_1,vec_2\nbert,32,madrid,1,2\nzoe,41,rome,5,6\n"
+    )
+
+
+@pytest.mark.anyio
+async def test_script_mode_xan_preserves_column_globs() -> None:
+    async with Bash() as bash:
+        await bash.write_file(
+            "/workspace/data.csv",
+            "name,vec_1,vec_2\nbert,1,2\nana,3,4\n",
+        )
+        result = await bash.exec_script('xan select vec_* /workspace/data.csv | tail -n 1')
+
+    assert result.exit_code == 0
+    assert result.stdout == "3,4\n"
+
+
+@pytest.mark.anyio
 async def test_argv_mode_find_supports_name_type_and_depth() -> None:
     async with Bash() as bash:
         await bash.mkdir("/workspace/docs", parents=True)

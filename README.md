@@ -55,10 +55,6 @@ Most commands are intentionally partial implementations. `abash` aims for safe, 
 
 Pending commands from [docs/pending_commands.md](docs/pending_commands.md):
 
-### Tier 4
-
-- `xan`
-
 ### Tier 5
 
 - `egrep`, `fgrep`

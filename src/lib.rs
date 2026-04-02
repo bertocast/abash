@@ -340,6 +340,7 @@ fn default_allowlisted_commands() -> Vec<String> {
         "python".to_string(),
         "python3".to_string(),
         "js-exec".to_string(),
+        "xan".to_string(),
         "xargs".to_string(),
         "rg".to_string(),
         "split".to_string(),

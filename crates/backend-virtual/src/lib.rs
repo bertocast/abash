@@ -41,6 +41,7 @@ mod tier2_text;
 mod tier3_exec;
 mod tier3_shell;
 mod which;
+mod xancmd;
 mod xargs;
 mod yq;
 
@@ -637,6 +638,7 @@ impl VirtualSession {
             "js-exec" => {
                 self.run_js_exec(cwd, args, stdin, &env, timeout_ms, cancel_flag, metadata)
             }
+            "xan" => self.run_xan(cwd, args, stdin, metadata),
             "xargs" => self.run_xargs(
                 runtime,
                 cwd,
@@ -875,8 +877,13 @@ impl VirtualSession {
             && command_name != "jq"
             && command_name != "yq"
             && command_name != "sqlite3"
+            && command_name != "xan"
         {
             return self.expand_globs(cwd, args.to_vec());
+        }
+
+        if command_name == "xan" {
+            return self.expand_xan_script_args(cwd, args);
         }
 
         let mut expanded = Vec::new();
@@ -997,6 +1004,102 @@ impl VirtualSession {
             } else {
                 expanded.extend(matches);
             }
+        }
+
+        Ok(expanded)
+    }
+
+    fn expand_xan_script_args(
+        &self,
+        cwd: &str,
+        args: &[String],
+    ) -> Result<Vec<String>, SandboxError> {
+        let Some(subcommand) = args.first() else {
+            return Ok(Vec::new());
+        };
+        let candidates = self.filesystem.list_paths()?;
+        let mut expanded = vec![subcommand.clone()];
+        let mut literal_next = false;
+        let mut positional_consumed = 0usize;
+
+        for arg in &args[1..] {
+            if literal_next {
+                expanded.push(arg.clone());
+                literal_next = false;
+                continue;
+            }
+
+            match subcommand.as_str() {
+                "search" if matches!(arg.as_str(), "-s" | "--select") => {
+                    expanded.push(arg.clone());
+                    literal_next = true;
+                    continue;
+                }
+                "search"
+                    if matches!(
+                        arg.as_str(),
+                        "-v" | "--invert" | "-i" | "--ignore-case" | "-r" | "--regex"
+                    ) =>
+                {
+                    expanded.push(arg.clone());
+                    continue;
+                }
+                "sort" if matches!(arg.as_str(), "-s" | "--select") => {
+                    expanded.push(arg.clone());
+                    literal_next = true;
+                    continue;
+                }
+                "sort"
+                    if matches!(arg.as_str(), "-N" | "--numeric" | "-R" | "-r" | "--reverse") =>
+                {
+                    expanded.push(arg.clone());
+                    continue;
+                }
+                "filter" if matches!(arg.as_str(), "-l" | "--limit") => {
+                    expanded.push(arg.clone());
+                    literal_next = true;
+                    continue;
+                }
+                "filter" if matches!(arg.as_str(), "-v" | "--invert") => {
+                    expanded.push(arg.clone());
+                    continue;
+                }
+                _ => {}
+            }
+
+            let keep_literal = match subcommand.as_str() {
+                "select" => positional_consumed == 0,
+                "search" => positional_consumed == 0,
+                "filter" => positional_consumed == 0,
+                _ => false,
+            };
+            if keep_literal {
+                expanded.push(arg.clone());
+                positional_consumed += 1;
+                continue;
+            }
+
+            if !contains_glob_pattern(arg) {
+                expanded.push(arg.clone());
+                positional_consumed += 1;
+                continue;
+            }
+
+            let pattern = resolve_sandbox_path(cwd, arg)?;
+            let mut matches = candidates
+                .iter()
+                .filter(|candidate| glob_matches_path(&pattern, candidate))
+                .map(|candidate| format_glob_match(cwd, arg, candidate))
+                .collect::<Vec<_>>();
+            matches.sort();
+            matches.dedup();
+
+            if matches.is_empty() {
+                expanded.push(arg.clone());
+            } else {
+                expanded.extend(matches);
+            }
+            positional_consumed += 1;
         }
 
         Ok(expanded)
@@ -1979,6 +2082,24 @@ impl VirtualSession {
         })?;
         Ok(ExecutionResult {
             stdout: result.stdout,
+            stderr: Vec::new(),
+            exit_code: result.exit_code,
+            termination_reason: TerminationReason::Exited,
+            error: None,
+            metadata,
+        })
+    }
+
+    fn run_xan(
+        &mut self,
+        cwd: &str,
+        args: Vec<String>,
+        stdin: Vec<u8>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        let result = xancmd::execute(cwd, &args, stdin, |path| self.filesystem.read_file(path))?;
+        Ok(ExecutionResult {
+            stdout: result.output,
             stderr: Vec::new(),
             exit_code: result.exit_code,
             termination_reason: TerminationReason::Exited,
@@ -4007,6 +4128,7 @@ mod tests {
                 "python",
                 "python3",
                 "js-exec",
+                "xan",
                 "xargs",
                 "rg",
                 "split",
