@@ -294,6 +294,7 @@ fn default_allowlisted_commands() -> Vec<String> {
         "curl".to_string(),
         "pwd".to_string(),
         "printenv".to_string(),
+        "du".to_string(),
         "cat".to_string(),
         "grep".to_string(),
         "egrep".to_string(),

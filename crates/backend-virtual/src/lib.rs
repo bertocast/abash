@@ -13,6 +13,7 @@ mod cp;
 mod curlcmd;
 mod date;
 mod diffcmd;
+mod ducmd;
 mod envcmd;
 mod exprcmd;
 mod find;
@@ -579,6 +580,7 @@ impl VirtualSession {
             )),
             "tree" => self.run_tree(cwd, args, metadata),
             "stat" => self.run_stat(cwd, args, metadata),
+            "du" => self.run_du(cwd, args, metadata),
             "file" => self.run_file(cwd, args, metadata),
             "readlink" => self.run_readlink(cwd, args, metadata),
             "ln" => self.run_ln(cwd, args, metadata),
@@ -2208,6 +2210,31 @@ impl VirtualSession {
             &candidates,
         )?;
         Ok(ExecutionResult::success(rendered, metadata))
+    }
+
+    fn run_du(
+        &mut self,
+        cwd: &str,
+        args: Vec<String>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        let candidates = self.filesystem.list_paths()?;
+        let result = ducmd::execute(
+            cwd,
+            &args,
+            |path| self.filesystem.exists(path),
+            |path| self.filesystem.read_file(path),
+            |path| self.filesystem.is_dir(path),
+            &candidates,
+        )?;
+        Ok(ExecutionResult {
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exit_code: result.exit_code,
+            termination_reason: TerminationReason::Exited,
+            error: None,
+            metadata,
+        })
     }
 
     fn run_chmod(
@@ -4094,6 +4121,7 @@ mod tests {
                 "sh",
                 "tree",
                 "stat",
+                "du",
                 "file",
                 "readlink",
                 "ln",

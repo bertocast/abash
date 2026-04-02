@@ -854,6 +854,36 @@ async def test_argv_mode_ls_supports_a_and_l() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_du_supports_summary_depth_and_total() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/docs/nested", parents=True)
+        await bash.write_file("/workspace/root.txt", "abcd")
+        await bash.write_file("/workspace/docs/a.txt", "xy")
+        await bash.write_file("/workspace/docs/nested/b.txt", "12345")
+        summary = await bash.exec(["du", "/workspace"])
+        shallow = await bash.exec(["du", "--max-depth=1", "/workspace"])
+        total = await bash.exec(["du", "-s", "-c", "/workspace/docs", "/workspace/root.txt"])
+
+    assert summary.exit_code == 0
+    assert summary.stdout == "5\t/workspace/docs/nested\n7\t/workspace/docs\n11\t/workspace\n"
+    assert shallow.exit_code == 0
+    assert shallow.stdout == "7\t/workspace/docs\n11\t/workspace\n"
+    assert total.exit_code == 0
+    assert total.stdout == "7\t/workspace/docs\n4\t/workspace/root.txt\n11\ttotal\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_du_supports_all_files_and_human_sizes() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/bin", parents=True)
+        await bash.write_file("/workspace/bin/blob.bin", "x" * 1536)
+        result = await bash.exec(["du", "-a", "-h", "/workspace/bin"])
+
+    assert result.exit_code == 0
+    assert result.stdout == "1.5K\t/workspace/bin/blob.bin\n1.5K\t/workspace/bin\n"
+
+
+@pytest.mark.anyio
 async def test_script_mode_ls_works_in_text_pipelines() -> None:
     async with Bash() as bash:
         await bash.mkdir("/workspace/docs", parents=True)

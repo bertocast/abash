@@ -1,6 +1,6 @@
 # Pending Commands
 
-`just-bash` commands still missing in `abash`, ranked by value / fit.
+Remaining `just-bash` command names not yet implemented in `abash`.
 
 ## Completed
 
@@ -20,13 +20,15 @@
 - [x] Tier 4: `python`
 - [x] Tier 4: `js-exec`
 - [x] Tier 4: `xan`
+- [x] Tier 5: `du`
+- [x] Tier 5: `egrep`
+- [x] Tier 5: `fgrep`
 
-## Tier 5
+## Remaining
 
-- [x] `egrep`
-- [x] `fgrep`
+- [ ] `html-to-markdown`
 
 ## Notes
 
-- `awk`: already shipped; deepen later only if workflows demand it
-- aliases last: `egrep`, `fgrep`
+- command-name parity is almost complete; most remaining work is command behavior, shell language, filesystem/runtime behavior, and extension surface
+- see [docs/roadmap.md](docs/roadmap.md) for the comparison-based implementation plan

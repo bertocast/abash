@@ -55,6 +55,10 @@ Most commands are intentionally partial implementations. `abash` aims for safe, 
 
 Pending commands from [docs/pending_commands.md](docs/pending_commands.md):
 
+- `html-to-markdown`
+
+Broader follow-up work is tracked in [docs/roadmap.md](docs/roadmap.md).
+
 ## Filesystem Modes
 
 | Mode | Read Visibility | Write Behavior | Persistence | Host Mutation |
