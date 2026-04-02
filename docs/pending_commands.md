@@ -1,6 +1,6 @@
 # Pending Commands
 
-Remaining `just-bash` command names not yet implemented in `abash`.
+Published `just-bash` command-name parity is complete in `abash`.
 
 ## Completed
 
@@ -23,12 +23,9 @@ Remaining `just-bash` command names not yet implemented in `abash`.
 - [x] Tier 5: `du`
 - [x] Tier 5: `egrep`
 - [x] Tier 5: `fgrep`
-
-## Remaining
-
-- [ ] `html-to-markdown`
+- [x] Tier 5: `html-to-markdown`
 
 ## Notes
 
-- command-name parity is almost complete; most remaining work is command behavior, shell language, filesystem/runtime behavior, and extension surface
+- command-name parity is complete; remaining work is command behavior, shell language, filesystem/runtime behavior, and extension surface
 - see [docs/roadmap.md](docs/roadmap.md) for the comparison-based implementation plan

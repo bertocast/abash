@@ -20,6 +20,7 @@ mod find;
 mod gzipcmd;
 mod hashcmd;
 mod hostexec;
+mod htmltomarkdown;
 mod jq;
 mod jsexeccmd;
 mod ls;
@@ -618,6 +619,7 @@ impl VirtualSession {
             "seq" => self.run_seq(args, metadata),
             "date" => self.run_date(args, metadata),
             "gzip" => self.run_gzip(cwd, args, stdin, metadata),
+            "html-to-markdown" => self.run_html_to_markdown(cwd, args, stdin, metadata),
             "gunzip" => self.run_gunzip(cwd, args, stdin, metadata),
             "zcat" => self.run_zcat(cwd, args, stdin, metadata),
             "tar" => self.run_tar(cwd, args, stdin, metadata),
@@ -2227,6 +2229,25 @@ impl VirtualSession {
             |path| self.filesystem.is_dir(path),
             &candidates,
         )?;
+        Ok(ExecutionResult {
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exit_code: result.exit_code,
+            termination_reason: TerminationReason::Exited,
+            error: None,
+            metadata,
+        })
+    }
+
+    fn run_html_to_markdown(
+        &mut self,
+        cwd: &str,
+        args: Vec<String>,
+        stdin: Vec<u8>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        let result =
+            htmltomarkdown::execute(cwd, &args, &stdin, |path| self.filesystem.read_file(path))?;
         Ok(ExecutionResult {
             stdout: result.stdout,
             stderr: result.stderr,
@@ -4162,6 +4183,7 @@ mod tests {
                 "seq",
                 "date",
                 "gzip",
+                "html-to-markdown",
                 "gunzip",
                 "zcat",
                 "tar",

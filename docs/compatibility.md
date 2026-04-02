@@ -9,7 +9,7 @@
 - sanitized error kinds
 - cooperative cancellation for long-running virtual commands
 - host-side file APIs for read/write/mkdir/exists
-- shell-first file and text workflows via `cd`, `export`, `expr`, `time`, `timeout`, `whoami`, `hostname`, `help`, `clear`, `history`, `alias`, `unalias`, `bash`, `sh`, `env`, `which`, `dirname`, `basename`, `curl`, `tree`, `stat`, `du`, `file`, `readlink`, `ln`, `cat`, `grep`, `egrep`, `fgrep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, `tr`, `paste`, `sed`, `join`, `awk`, `jq`, `yq`, `sqlite3`, `find`, `ls`, `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `rm`, `rmdir`, `cp`, `mv`, `tee`, `printf`, `seq`, `date`, `comm`, `diff`, `column`, `chmod`, `python`, `python3`, `js-exec`, `xan`, `xargs`, `rg`, `split`, `od`, `base64`, `md5sum`, `sha1sum`, `sha256sum`, `gzip`, `tar`, `mkdir`, and `touch`
+- shell-first file and text workflows via `cd`, `export`, `expr`, `time`, `timeout`, `whoami`, `hostname`, `help`, `clear`, `history`, `alias`, `unalias`, `bash`, `sh`, `env`, `which`, `dirname`, `basename`, `curl`, `tree`, `stat`, `du`, `file`, `readlink`, `ln`, `cat`, `grep`, `egrep`, `fgrep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, `tr`, `paste`, `sed`, `join`, `awk`, `jq`, `yq`, `sqlite3`, `find`, `ls`, `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `html-to-markdown`, `rm`, `rmdir`, `cp`, `mv`, `tee`, `printf`, `seq`, `date`, `comm`, `diff`, `column`, `chmod`, `python`, `python3`, `js-exec`, `xan`, `xargs`, `rg`, `split`, `od`, `base64`, `md5sum`, `sha1sum`, `sha256sum`, `gzip`, `tar`, `mkdir`, and `touch`
 - typed `NetworkPolicy` configuration surface
 - in-process detached execution via `Bash.exec_detached()`
 - one-active-run session handles with `wait`, `cancel`, `status`, and buffered output accessors
@@ -54,6 +54,7 @@
 - narrow `alias` / `unalias`: supported
 - narrow `bash` / `sh` with `-c <script>` or one script path: supported, child-shell state stays isolated
 - narrow `curl` with policy-gated `-X`, `-d`, `-I`, `-i`, `-o`, and `-L`: supported
+- narrow `html-to-markdown` with file-or-stdin input plus `--bullet`, `--code`, `--hr`, and `--heading-style`: supported
 - narrow `tree` with optional `-a` and `-L`: supported
 - narrow `stat` for type, mode bits, and file-size-or-entry-count metadata: supported
 - narrow `du` with `-a`, `-h`, `-s`, `-c`, and `--max-depth=N`: supported

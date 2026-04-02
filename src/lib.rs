@@ -329,6 +329,7 @@ fn default_allowlisted_commands() -> Vec<String> {
         "seq".to_string(),
         "date".to_string(),
         "gzip".to_string(),
+        "html-to-markdown".to_string(),
         "gunzip".to_string(),
         "zcat".to_string(),
         "tar".to_string(),

@@ -2,21 +2,16 @@
 
 Comparison baseline: `just-bash` from Vercel Labs.
 
-This document turns the remaining comparison work into implementation tracks. Command-name parity is nearly complete; the larger body of work now sits in shell language, command behavior, runtime behavior, and extension surface.
+This document turns the remaining comparison work into implementation tracks. Command-name parity is complete; the larger body of work now sits in shell language, command behavior, runtime behavior, and extension surface.
 
 ## Command Surface
 
-Still missing from the published `just-bash` command list:
+Published command-name parity with the `just-bash` README is complete.
 
-- `html-to-markdown`
+Recommended focus:
 
-Recommended order:
-
-1. `html-to-markdown`
-
-Rationale:
-
-- `html-to-markdown` rounds out the network/data flow story around `curl`
+1. keep the command list in sync as upstream adds or removes names
+2. spend implementation time on behavior depth instead of more names
 
 ## Shell Language
 
@@ -161,24 +156,21 @@ Rationale:
 
 Main follow-up items:
 
-- `html-to-markdown`
 - broader `curl` behavior if parity matters
 
 Recommended order:
 
-1. `html-to-markdown`
-2. targeted `curl` improvements driven by real workflows
+1. targeted `curl` improvements driven by real workflows
 
 ## Suggested Sequence
 
 If the goal is to move closer to `just-bash` with high payoff and controlled scope:
 
-1. `html-to-markdown`
-2. `${VAR:-default}`
-3. positional parameters
-4. `elif`
-5. `while`
-6. `grep` depth
-7. hard links in `ln`
-8. execution-state decision
-9. custom command registration
+1. `${VAR:-default}`
+2. positional parameters
+3. `elif`
+4. `while`
+5. `grep` depth
+6. hard links in `ln`
+7. execution-state decision
+8. custom command registration

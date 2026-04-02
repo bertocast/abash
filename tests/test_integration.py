@@ -884,6 +884,60 @@ async def test_argv_mode_du_supports_all_files_and_human_sizes() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_html_to_markdown_supports_stdin_and_options() -> None:
+    async with Bash() as bash:
+        result = await bash.exec(
+            [
+                "html-to-markdown",
+                "--bullet=+",
+                "--code=~~~",
+                "--hr=***",
+                "--heading-style=setext",
+            ],
+            stdin=(
+                "<h1>Title</h1><ul><li>One</li></ul><pre><code>x = 1;</code></pre>"
+                "<hr><script>alert(1)</script><style>body{}</style><footer>bye</footer>"
+            ),
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout.startswith("Title\n=====")
+    assert "+ One" in result.stdout
+    assert "~~~" in result.stdout
+    assert "***" in result.stdout
+    assert "alert" not in result.stdout
+    assert "body{}" not in result.stdout
+    assert "bye" not in result.stdout
+
+
+@pytest.mark.anyio
+async def test_argv_mode_html_to_markdown_supports_file_input_and_help() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/page.html", "<h2>From File</h2>")
+        file_result = await bash.exec(["html-to-markdown", "/workspace/page.html"])
+        help_result = await bash.exec(["html-to-markdown", "--help"])
+
+    assert file_result.exit_code == 0
+    assert file_result.stdout == "## From File\n"
+    assert help_result.exit_code == 0
+    assert "html-to-markdown" in help_result.stdout
+    assert "--bullet" in help_result.stdout
+    assert "curl -s https://example.com | html-to-markdown" in help_result.stdout
+
+
+@pytest.mark.anyio
+async def test_argv_mode_html_to_markdown_reports_missing_file() -> None:
+    async with Bash() as bash:
+        result = await bash.exec(["html-to-markdown", "/workspace/missing.html"])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr == (
+        "html-to-markdown: /workspace/missing.html: No such file or directory\n"
+    )
+
+
+@pytest.mark.anyio
 async def test_script_mode_ls_works_in_text_pipelines() -> None:
     async with Bash() as bash:
         await bash.mkdir("/workspace/docs", parents=True)

@@ -30,7 +30,7 @@ The current implementation provides:
 - timeout and cooperative cancellation plumbing
 - sanitized error propagation
 - shell-first file and text workflows through a narrow builtin command set
-- typed network-policy configuration kept for future network commands
+- typed network-policy configuration plus policy-gated network execution for `curl`
 - host-side embedding APIs for reading, writing, creating, and checking sandbox files
 - workspace-aware filesystem policy for `memory`, `host_readonly`, `host_cow`, and `host_readwrite`
 - in-process detached execution through `Bash.exec_detached()`
@@ -43,21 +43,16 @@ The current implementation provides:
 
 Implemented today on the virtual backend:
 
-- shell/env: `cd`, `export`, `alias`, `unalias`, `history`, `help`, `clear`, `whoami`, `hostname`, `bash`, `sh`, `env`, `which`, `dirname`, `basename`, `expr`, `time`, `timeout`, `printf`, `seq`, `date`, `curl`
-- file/text: `cat`, `grep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, `tr`, `paste`, `sed`, `join`, `awk`, `jq`, `yq`, `sqlite3`, `find`, `ls`, `tree`, `stat`, `file`, `readlink`
+- shell/env: `cd`, `export`, `alias`, `unalias`, `history`, `help`, `clear`, `whoami`, `hostname`, `bash`, `sh`, `env`, `which`, `dirname`, `basename`, `expr`, `time`, `timeout`, `printf`, `seq`, `date`
+- file/text: `cat`, `grep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, `tr`, `paste`, `sed`, `join`, `awk`, `jq`, `yq`, `sqlite3`, `find`, `ls`, `tree`, `stat`, `du`, `file`, `readlink`, `html-to-markdown`
 - workspace/filesystem mutation: `ln`, `rm`, `rmdir`, `cp`, `mv`, `mkdir`, `touch`, `tee`, `gzip`
+- network/data: `curl`
 - inspection/formatting: `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `column`, `comm`, `diff`, `rg`, `split`, `od`
 - encoding/checksums: `base64`, `md5sum`, `sha1sum`, `sha256sum`
 
 Most commands are intentionally partial implementations. `abash` aims for safe, useful workflows first, not full GNU/bash parity.
 
-## Not Yet Implemented
-
-Pending commands from [docs/pending_commands.md](docs/pending_commands.md):
-
-- `html-to-markdown`
-
-Broader follow-up work is tracked in [docs/roadmap.md](docs/roadmap.md).
+Command-name parity work is tracked in [docs/pending_commands.md](docs/pending_commands.md). Broader follow-up work is tracked in [docs/roadmap.md](docs/roadmap.md).
 
 ## Filesystem Modes
 
@@ -79,7 +74,7 @@ Broader follow-up work is tracked in [docs/roadmap.md](docs/roadmap.md).
 ## Network Policy
 
 - Network access remains disabled unless the sandbox is configured with a `NetworkPolicy`.
-- No public network-capable builtin currently ships.
+- `curl` is the public network-capable builtin on the virtual backend.
 - Each request is checked against explicit scheme, origin, path-prefix, method, timeout, and response-size policy.
 - Host-injected headers are attached outside the sandbox boundary and are not exposed through environment variables.
 
@@ -99,7 +94,7 @@ Broader follow-up work is tracked in [docs/roadmap.md](docs/roadmap.md).
 - Pipeline execution is buffered and sequential inside the virtual backend; it is not a streaming process graph.
 - Variable expansion applies only in script mode, only for explicit request env plus command-local assignments, and does not expose host env.
 - Globbing currently applies only to expanded script arguments; command names and redirection targets stay literal.
-- Command behavior is intentionally narrow even when a command name exists. Examples: `env` supports only `-i` plus inline assignments, `tree` only `-a` and `-L`, `sed` only literal `s/old/new/` with optional `g`, `find` only `-name`, `-type`, and `-maxdepth`, `ls` only `-a` and `-l`, `rm` only `-f` and `-r`, `rg` only `-n`, `-l`, and `-i`, `base64` only encode plus `-d`, and `date` only default output plus narrow `+FORMAT` tokens.
+- Command behavior is intentionally narrow even when a command name exists. Examples: `env` supports only `-i` plus inline assignments, `tree` only `-a` and `-L`, `sed` only literal `s/old/new/` with optional `g`, `find` only `-name`, `-type`, and `-maxdepth`, `ls` only `-a` and `-l`, `rm` only `-f` and `-r`, `rg` only `-n`, `-l`, and `-i`, `html-to-markdown` only supports file-or-stdin conversion plus `--bullet`, `--code`, `--hr`, and `--heading-style`, `base64` only encode plus `-d`, and `date` only default output plus narrow `+FORMAT` tokens.
 - Unsupported today: global shell variables, broader control flow beyond `if ... then ... [else] ... fi`, functions, subshells, broader fd juggling beyond `2>`, `2>>`, `2>&1`, job control, and TTY semantics.
 
 ## Current Limitations
