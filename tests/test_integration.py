@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import re
@@ -772,6 +773,23 @@ async def test_argv_mode_yq_supports_inplace_writes() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_yq_inplace_preserves_source_format_and_updates_multiple_files() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/a.json", '{"name":"bert"}\n')
+        await bash.write_file("/workspace/b.json", '{"name":"ana"}\n')
+        result = await bash.exec(
+            ["yq", "-i", '.name = "core"', "/workspace/a.json", "/workspace/b.json"]
+        )
+        a_updated = await bash.read_file("/workspace/a.json")
+        b_updated = await bash.read_file("/workspace/b.json")
+
+    assert result.exit_code == 0
+    assert result.stdout == ""
+    assert json.loads(a_updated) == {"name": "core"}
+    assert json.loads(b_updated) == {"name": "core"}
+
+
+@pytest.mark.anyio
 async def test_argv_mode_yq_inplace_requires_real_file() -> None:
     async with Bash() as bash:
         result = await bash.exec(["yq", "-i", ".name"], stdin="name: bert\n")
@@ -779,7 +797,21 @@ async def test_argv_mode_yq_inplace_requires_real_file() -> None:
     assert result.exit_code == 1
     assert result.error is not None
     assert result.error.kind.value == "invalid_request"
-    assert "requires a file argument" in result.error.message
+    assert "requires at least one file argument" in result.error.message
+
+
+@pytest.mark.anyio
+async def test_argv_mode_yq_inplace_rejects_front_matter_rewrites() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/post.md", "---\ntitle: bert\n---\nbody\n")
+        result = await bash.exec(
+            ["yq", "-i", "--front-matter", '.title = "ana"', "/workspace/post.md"]
+        )
+
+    assert result.exit_code == 1
+    assert result.error is not None
+    assert result.error.kind.value == "invalid_request"
+    assert "does not support --front-matter rewrites" in result.error.message
 
 
 @pytest.mark.anyio

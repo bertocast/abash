@@ -2300,7 +2300,7 @@ impl VirtualSession {
             let resolved = resolve_sandbox_path(cwd, path)?;
             self.filesystem.read_file(&resolved)
         })?;
-        if let Some(writeback) = result.writeback {
+        for writeback in result.writebacks {
             let resolved = resolve_sandbox_path(cwd, &writeback.path)?;
             self.filesystem
                 .write_file(&resolved, writeback.contents, false)?;

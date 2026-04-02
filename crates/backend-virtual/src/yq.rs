@@ -13,7 +13,7 @@ use crate::jq;
 pub(crate) struct Execution {
     pub(crate) stdout: Vec<u8>,
     pub(crate) exit_code: i32,
-    pub(crate) writeback: Option<Writeback>,
+    pub(crate) writebacks: Vec<Writeback>,
 }
 
 pub(crate) struct Writeback {
@@ -30,6 +30,10 @@ where
     F: FnMut(&str) -> Result<Vec<u8>, SandboxError>,
 {
     let spec = parse_invocation(args)?;
+    if spec.inplace {
+        return execute_inplace(&spec, stdin, &mut read_file);
+    }
+
     let jq_args = to_jq_args(&spec);
     let jq_input = if spec.null_input {
         Vec::new()
@@ -42,34 +46,12 @@ where
         ))
     })?;
 
-    let stdout = if spec.output_format == Format::Json || spec.raw_output {
-        result.stdout
-    } else {
-        match spec.output_format {
-            Format::Json => result.stdout,
-            Format::Yaml => render_yaml_output(result.stdout)?,
-            Format::Toml => render_toml_output(result.stdout)?,
-            Format::Csv => render_csv_output(result.stdout)?,
-            Format::Ini => render_ini_output(result.stdout)?,
-            Format::Xml => render_xml_output(result.stdout)?,
-        }
-    };
-
-    if spec.inplace {
-        return Ok(Execution {
-            stdout: Vec::new(),
-            exit_code: result.exit_code,
-            writeback: Some(Writeback {
-                path: inplace_path(&spec)?,
-                contents: stdout,
-            }),
-        });
-    }
+    let stdout = render_output(&spec, spec.output_format, result.stdout)?;
 
     Ok(Execution {
         stdout,
         exit_code: result.exit_code,
-        writeback: None,
+        writebacks: Vec::new(),
     })
 }
 
@@ -87,6 +69,7 @@ struct Invocation {
     input_format: Format,
     input_format_explicit: bool,
     output_format: Format,
+    output_format_explicit: bool,
     inplace: bool,
     raw_output: bool,
     compact_output: bool,
@@ -102,6 +85,7 @@ fn parse_invocation(args: &[String]) -> Result<Invocation, SandboxError> {
     let mut input_format = Format::Yaml;
     let mut input_format_explicit = false;
     let mut output_format = Format::Yaml;
+    let mut output_format_explicit = false;
     let mut inplace = false;
     let mut raw_output = false;
     let mut compact_output = false;
@@ -135,11 +119,13 @@ fn parse_invocation(args: &[String]) -> Result<Invocation, SandboxError> {
                     ));
                 };
                 output_format = parse_format(value)?;
+                output_format_explicit = true;
                 index += 2;
                 continue;
             }
             value if value.starts_with("--output-format=") => {
                 output_format = parse_format(&value["--output-format=".len()..])?;
+                output_format_explicit = true;
             }
             "-i" | "--inplace" => inplace = true,
             "-r" | "--raw-output" => raw_output = true,
@@ -187,6 +173,7 @@ fn parse_invocation(args: &[String]) -> Result<Invocation, SandboxError> {
         input_format,
         input_format_explicit,
         output_format,
+        output_format_explicit,
         inplace,
         raw_output,
         compact_output,
@@ -213,19 +200,23 @@ fn parse_format(value: &str) -> Result<Format, SandboxError> {
     }
 }
 
-fn inplace_path(spec: &Invocation) -> Result<String, SandboxError> {
-    match spec.paths.as_slice() {
-        [path] if path != "-" => Ok(path.clone()),
-        [] => Err(SandboxError::InvalidRequest(
-            "yq -i requires a file argument".to_string(),
-        )),
-        [path] if path == "-" => Err(SandboxError::InvalidRequest(
-            "yq -i does not support stdin".to_string(),
-        )),
-        _ => Err(SandboxError::InvalidRequest(
-            "yq -i currently supports exactly one file argument".to_string(),
-        )),
+fn inplace_paths(spec: &Invocation) -> Result<&[String], SandboxError> {
+    if spec.front_matter {
+        return Err(SandboxError::InvalidRequest(
+            "yq -i does not support --front-matter rewrites".to_string(),
+        ));
     }
+    if spec.paths.is_empty() {
+        return Err(SandboxError::InvalidRequest(
+            "yq -i requires at least one file argument".to_string(),
+        ));
+    }
+    if spec.paths.iter().any(|path| path == "-") {
+        return Err(SandboxError::InvalidRequest(
+            "yq -i does not support stdin".to_string(),
+        ));
+    }
+    Ok(&spec.paths)
 }
 
 fn to_jq_args(spec: &Invocation) -> Vec<String> {
@@ -247,6 +238,68 @@ fn to_jq_args(spec: &Invocation) -> Vec<String> {
     }
     args.push(spec.filter.clone());
     args
+}
+
+fn execute_inplace<F>(
+    spec: &Invocation,
+    _stdin: Vec<u8>,
+    read_file: &mut F,
+) -> Result<Execution, SandboxError>
+where
+    F: FnMut(&str) -> Result<Vec<u8>, SandboxError>,
+{
+    let jq_args = to_jq_args(spec);
+    let mut writebacks = Vec::new();
+    let mut exit_code = 0;
+
+    for path in inplace_paths(spec)? {
+        let bytes = read_file(path)?;
+        let format = effective_input_format(spec, path);
+        let mut jq_input = Vec::new();
+        append_source_values(&mut jq_input, &bytes, format, false)?;
+        let result = jq::execute(&jq_args, jq_input, |_| {
+            Err(SandboxError::BackendFailure(
+                "yq internal file passthrough is unavailable".to_string(),
+            ))
+        })?;
+        if result.exit_code != 0 {
+            exit_code = result.exit_code;
+        }
+        let output_format = if spec.output_format_explicit {
+            spec.output_format
+        } else {
+            format
+        };
+        writebacks.push(Writeback {
+            path: path.clone(),
+            contents: render_output(spec, output_format, result.stdout)?,
+        });
+    }
+
+    Ok(Execution {
+        stdout: Vec::new(),
+        exit_code,
+        writebacks,
+    })
+}
+
+fn render_output(
+    spec: &Invocation,
+    output_format: Format,
+    stdout: Vec<u8>,
+) -> Result<Vec<u8>, SandboxError> {
+    if output_format == Format::Json || spec.raw_output {
+        return Ok(stdout);
+    }
+
+    match output_format {
+        Format::Json => Ok(stdout),
+        Format::Yaml => render_yaml_output(stdout),
+        Format::Toml => render_toml_output(stdout),
+        Format::Csv => render_csv_output(stdout),
+        Format::Ini => render_ini_output(stdout),
+        Format::Xml => render_xml_output(stdout),
+    }
 }
 
 fn transcode_inputs<F>(
@@ -1184,16 +1237,20 @@ mod tests {
         let spec = parse_invocation(&[
             "-i".to_string(),
             ".name".to_string(),
+            "/tmp/data-a.yaml".to_string(),
             "/tmp/data.yaml".to_string(),
         ])
         .unwrap();
         assert!(spec.inplace);
-        assert_eq!(inplace_path(&spec).unwrap(), "/tmp/data.yaml");
+        assert_eq!(
+            inplace_paths(&spec).unwrap(),
+            &["/tmp/data-a.yaml".to_string(), "/tmp/data.yaml".to_string(),]
+        );
 
         let err =
             parse_invocation(&["-i".to_string(), ".name".to_string(), "-".to_string()]).unwrap();
         assert_eq!(
-            inplace_path(&err).unwrap_err().to_string(),
+            inplace_paths(&err).unwrap_err().to_string(),
             "invalid request: yq -i does not support stdin"
         );
     }

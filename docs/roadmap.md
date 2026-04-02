@@ -62,21 +62,21 @@ Many commands now exist by name in both projects, but `just-bash` is still broad
 
 Highest-priority work:
 
-- `yq`: richer in-place/editing semantics beyond the current narrow file-rewrite surface
 - `awk`: control-flow/runtime surface beyond the current richer regex/`printf` plus array core
 - `xan`: aggregation/data-conversion subcommands beyond the current reshape plus initial `frequency`/`stats` slice
+- `yq`: broader editing behavior beyond the current multi-file format-preserving `-i` core
 
 Recommended order:
 
-1. `yq`
-2. `awk`
-3. `xan`
+1. `awk`
+2. `xan`
+3. `yq`
 
 Rationale:
 
-- `grep`, `ln`, execution reset-mode, a broader `jq` slice with direct path assignment, YAML/JSON/TOML/CSV/INI/XML/front-matter `yq`, narrow `yq -i`, a second `xan` row-shaping wave (`behead`, `cat`, `dedup`, `top`), a third `xan` aggregation wave (`frequency`, `stats`), and two `awk` lifts (`regex`/`printf`, then associative-array reads and writes) are landed
+- `grep`, `ln`, execution reset-mode, a broader `jq` slice with direct path assignment, YAML/JSON/TOML/CSV/INI/XML/front-matter `yq`, a broader `yq -i` with multi-file format-preserving rewrites, a second `xan` row-shaping wave (`behead`, `cat`, `dedup`, `top`), a third `xan` aggregation wave (`frequency`, `stats`), and two `awk` lifts (`regex`/`printf`, then associative-array reads and writes) are landed
 - `jq` and `yq` affect high-value agent data workflows
-- `yq` now has the clearest remaining workflow payoff, `awk` still wants control-flow and array-iteration depth, and `xan` aggregation follow-ups like `groupby` or `agg` can follow after that
+- `awk` still wants control-flow and array-iteration depth, `xan` can grow into `groupby` or `agg`, and `yq` now shifts from basic editing support to broader function/edit behavior
 
 ## JavaScript Runtime
 
