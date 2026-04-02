@@ -496,6 +496,8 @@ impl<'a> Parser<'a> {
                     let content = content.trim();
                     if let Some((start, finish)) = parse_slice(content)? {
                         ops.push(PathOp::Slice(start, finish));
+                    } else if let Some(key) = parse_bracket_key(content)? {
+                        ops.push(PathOp::Key(key));
                     } else if let Ok(index) = content.parse::<isize>() {
                         ops.push(PathOp::Index(index));
                     } else {
@@ -782,6 +784,17 @@ fn parse_optional_index(source: &str) -> Result<Option<isize>, SandboxError> {
         .map_err(|_| SandboxError::InvalidRequest(format!("jq slice bound is not valid: {source}")))
 }
 
+fn parse_bracket_key(source: &str) -> Result<Option<String>, SandboxError> {
+    if source.len() < 2 {
+        return Ok(None);
+    }
+    let quote = source.chars().next().unwrap_or_default();
+    if (quote != '"' && quote != '\'') || !source.ends_with(quote) {
+        return Ok(None);
+    }
+    Ok(Some(source[1..source.len() - 1].to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -819,5 +832,12 @@ mod tests {
             vec![json!(true)]
         );
         assert_eq!(run_program(&ty, &[input]), vec![json!("object")]);
+    }
+
+    #[test]
+    fn supports_bracket_string_key_access() {
+        let program = parse_program(r#".root.user["+@id"]"#).unwrap();
+        let input = json!({"root": {"user": {"+@id": "7"}}});
+        assert_eq!(run_program(&program, &[input]), vec![json!("7")]);
     }
 }

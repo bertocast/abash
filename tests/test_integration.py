@@ -700,6 +700,30 @@ async def test_argv_mode_yq_supports_front_matter_extraction() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_yq_supports_xml_input_and_output() -> None:
+    async with Bash() as bash:
+        await bash.write_file(
+            "/workspace/data.xml",
+            '<root><user id="7"><name>bert</name></user></root>\n',
+        )
+        name = await bash.exec(["yq", "-p", "xml", "-r", ".root.user.name", "/workspace/data.xml"])
+        identifier = await bash.exec(
+            ["yq", "-p", "xml", "-r", '.root.user["+@id"]', "/workspace/data.xml"]
+        )
+        rendered = await bash.exec(
+            ["yq", "-p", "json", "-o", "xml", "."],
+            stdin='{"root":{"user":{"name":"bert","+@id":"7"}}}\n',
+        )
+
+    assert name.exit_code == 0
+    assert name.stdout == "bert\n"
+    assert identifier.stdout == "7\n"
+    assert "<root>" in rendered.stdout
+    assert 'id="7"' in rendered.stdout
+    assert "<name>bert</name>" in rendered.stdout
+
+
+@pytest.mark.anyio
 async def test_script_mode_yq_works_in_pipelines_without_globbing_filter() -> None:
     async with Bash() as bash:
         await bash.write_file(

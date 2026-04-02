@@ -1,4 +1,9 @@
+use std::collections::BTreeMap;
+
 use abash_core::SandboxError;
+use quick_xml::escape::unescape;
+use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
+use quick_xml::{Reader, Writer};
 use serde::Deserialize;
 use serde_json::{Deserializer, Map, Number, Value};
 use toml::Value as TomlValue;
@@ -48,6 +53,10 @@ where
             stdout: render_ini_output(result.stdout)?,
             exit_code: result.exit_code,
         }),
+        Format::Xml => Ok(jq::Execution {
+            stdout: render_xml_output(result.stdout)?,
+            exit_code: result.exit_code,
+        }),
     }
 }
 
@@ -58,6 +67,7 @@ enum Format {
     Toml,
     Csv,
     Ini,
+    Xml,
 }
 
 struct Invocation {
@@ -178,6 +188,7 @@ fn parse_format(value: &str) -> Result<Format, SandboxError> {
         "toml" => Ok(Format::Toml),
         "csv" | "tsv" => Ok(Format::Csv),
         "ini" => Ok(Format::Ini),
+        "xml" => Ok(Format::Xml),
         other => Err(SandboxError::InvalidRequest(format!(
             "yq format is not supported: {other}"
         ))),
@@ -242,6 +253,7 @@ fn effective_input_format(spec: &Invocation, path: &str) -> Format {
             "toml" => return Format::Toml,
             "csv" | "tsv" => return Format::Csv,
             "ini" => return Format::Ini,
+            "xml" => return Format::Xml,
             "yaml" | "yml" => return Format::Yaml,
             _ => {}
         }
@@ -287,6 +299,10 @@ fn append_source_values(
         Format::Ini => {
             let text = decode_utf8(bytes, "yq currently requires UTF-8 INI input")?;
             append_json_value(output, &ini_to_json(text)?)?;
+        }
+        Format::Xml => {
+            let text = decode_utf8(bytes, "yq currently requires UTF-8 XML input")?;
+            append_json_value(output, &xml_to_json(text)?)?;
         }
     }
     Ok(())
@@ -354,6 +370,30 @@ fn render_ini_output(stdout: Vec<u8>) -> Result<Vec<u8>, SandboxError> {
         rendered.push_str(&render_ini_value(value)?);
     }
     Ok(rendered.into_bytes())
+}
+
+fn render_xml_output(stdout: Vec<u8>) -> Result<Vec<u8>, SandboxError> {
+    let values = parse_json_output(stdout)?;
+    let mut rendered = Vec::new();
+    for value in &values {
+        let Value::Object(object) = value else {
+            return Err(SandboxError::InvalidRequest(
+                "yq can only render objects as XML".to_string(),
+            ));
+        };
+        if object.len() != 1 {
+            return Err(SandboxError::InvalidRequest(
+                "yq XML output requires exactly one root element".to_string(),
+            ));
+        }
+        let (root_name, root_value) = object.iter().next().expect("root");
+        let mut writer = Writer::new_with_indent(Vec::new(), b' ', 2);
+        write_xml_value(&mut writer, root_name, root_value)?;
+        let mut chunk = writer.into_inner();
+        chunk.push(b'\n');
+        rendered.extend_from_slice(&chunk);
+    }
+    Ok(rendered)
 }
 
 fn parse_json_output(stdout: Vec<u8>) -> Result<Vec<Value>, SandboxError> {
@@ -527,6 +567,231 @@ fn ini_scalar_string(value: &Value) -> Result<String, SandboxError> {
         _ => {
             return Err(SandboxError::InvalidRequest(
                 "yq can only render scalar INI values".to_string(),
+            ))
+        }
+    })
+}
+
+#[derive(Default)]
+struct XmlNode {
+    name: String,
+    attributes: Map<String, Value>,
+    children: BTreeMap<String, Vec<Value>>,
+    text: String,
+}
+
+fn xml_to_json(input: &str) -> Result<Value, SandboxError> {
+    let mut reader = Reader::from_str(input);
+    reader.config_mut().trim_text(true);
+    let mut stack = Vec::<XmlNode>::new();
+    let mut root = None::<Value>;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(event)) => stack.push(start_node(&reader, &event)?),
+            Ok(Event::Empty(event)) => {
+                let node = node_to_value(start_node(&reader, &event)?);
+                if let Some(parent) = stack.last_mut() {
+                    append_child(parent, &event_name(&event)?, node);
+                } else {
+                    let mut object = Map::new();
+                    object.insert(event_name(&event)?, node);
+                    root = Some(Value::Object(object));
+                }
+            }
+            Ok(Event::Text(event)) => {
+                if let Some(node) = stack.last_mut() {
+                    let text = unescape(&String::from_utf8_lossy(event.as_ref()))
+                        .map_err(|error| {
+                            SandboxError::InvalidRequest(format!(
+                                "yq could not parse XML input: {error}"
+                            ))
+                        })?
+                        .into_owned();
+                    if !text.is_empty() {
+                        if !node.text.is_empty() {
+                            node.text.push(' ');
+                        }
+                        node.text.push_str(&text);
+                    }
+                }
+            }
+            Ok(Event::End(_)) => {
+                let Some(node) = stack.pop() else {
+                    return Err(SandboxError::InvalidRequest(
+                        "yq could not parse XML input: unexpected closing tag".to_string(),
+                    ));
+                };
+                let name = node.name.clone();
+                let value = node_to_value(node);
+                if let Some(parent) = stack.last_mut() {
+                    append_child(parent, &name, value);
+                } else {
+                    let mut object = Map::new();
+                    object.insert(name, value);
+                    root = Some(Value::Object(object));
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(
+                Event::Decl(_)
+                | Event::Comment(_)
+                | Event::CData(_)
+                | Event::PI(_)
+                | Event::DocType(_)
+                | Event::GeneralRef(_),
+            ) => {}
+            Err(error) => {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "yq could not parse XML input: {error}"
+                )))
+            }
+        }
+    }
+
+    root.ok_or_else(|| {
+        SandboxError::InvalidRequest("yq could not parse XML input: empty document".to_string())
+    })
+}
+
+fn start_node(reader: &Reader<&[u8]>, event: &BytesStart<'_>) -> Result<XmlNode, SandboxError> {
+    let mut node = XmlNode {
+        name: event_name(event)?,
+        ..XmlNode::default()
+    };
+    for attribute in event.attributes() {
+        let attribute = attribute.map_err(|error| {
+            SandboxError::InvalidRequest(format!("yq could not parse XML input: {error}"))
+        })?;
+        let key = format!("+@{}", String::from_utf8_lossy(attribute.key.as_ref()));
+        let value = attribute
+            .decode_and_unescape_value(reader.decoder())
+            .map_err(|error| {
+                SandboxError::InvalidRequest(format!("yq could not parse XML input: {error}"))
+            })?;
+        node.attributes
+            .insert(key, Value::String(value.into_owned()));
+    }
+    Ok(node)
+}
+
+fn event_name(event: &BytesStart<'_>) -> Result<String, SandboxError> {
+    std::str::from_utf8(event.name().as_ref())
+        .map(|value| value.to_string())
+        .map_err(|_| {
+            SandboxError::InvalidRequest("yq currently requires UTF-8 XML tag names".to_string())
+        })
+}
+
+fn append_child(node: &mut XmlNode, name: &str, value: Value) {
+    node.children
+        .entry(name.to_string())
+        .or_default()
+        .push(value);
+}
+
+fn node_to_value(node: XmlNode) -> Value {
+    if node.attributes.is_empty() && node.children.is_empty() {
+        return Value::String(node.text);
+    }
+    let mut object = node.attributes;
+    for (name, values) in node.children {
+        let value = if values.len() == 1 {
+            values.into_iter().next().unwrap_or(Value::Null)
+        } else {
+            Value::Array(values)
+        };
+        object.insert(name, value);
+    }
+    if !node.text.is_empty() {
+        object.insert("+content".to_string(), Value::String(node.text));
+    }
+    Value::Object(object)
+}
+
+fn write_xml_value(
+    writer: &mut Writer<Vec<u8>>,
+    name: &str,
+    value: &Value,
+) -> Result<(), SandboxError> {
+    if !matches!(value, Value::Object(_)) {
+        let start = BytesStart::new(name);
+        writer
+            .write_event(Event::Start(start.borrow()))
+            .map_err(|error| {
+                SandboxError::BackendFailure(format!("yq could not render XML output: {error}"))
+            })?;
+        writer
+            .write_event(Event::Text(BytesText::new(&xml_scalar_string(value)?)))
+            .map_err(|error| {
+                SandboxError::BackendFailure(format!("yq could not render XML output: {error}"))
+            })?;
+        writer
+            .write_event(Event::End(BytesEnd::new(name)))
+            .map_err(|error| {
+                SandboxError::BackendFailure(format!("yq could not render XML output: {error}"))
+            })?;
+        return Ok(());
+    }
+    let Value::Object(object) = value else {
+        unreachable!()
+    };
+
+    let mut start = BytesStart::new(name);
+    let mut attrs = Vec::new();
+    for (key, value) in object {
+        if let Some(attribute) = key.strip_prefix("+@") {
+            attrs.push((attribute.to_string(), xml_scalar_string(value)?));
+        }
+    }
+    for (key, value) in &attrs {
+        start.push_attribute((key.as_str(), value.as_str()));
+    }
+    writer
+        .write_event(Event::Start(start.borrow()))
+        .map_err(|error| {
+            SandboxError::BackendFailure(format!("yq could not render XML output: {error}"))
+        })?;
+
+    if let Some(content) = object.get("+content") {
+        writer
+            .write_event(Event::Text(BytesText::new(&xml_scalar_string(content)?)))
+            .map_err(|error| {
+                SandboxError::BackendFailure(format!("yq could not render XML output: {error}"))
+            })?;
+    }
+
+    for (key, child) in object {
+        if key == "+content" || key.starts_with("+@") {
+            continue;
+        }
+        match child {
+            Value::Array(items) => {
+                for item in items {
+                    write_xml_value(writer, key, item)?;
+                }
+            }
+            _ => write_xml_value(writer, key, child)?,
+        }
+    }
+
+    writer
+        .write_event(Event::End(BytesEnd::new(name)))
+        .map_err(|error| {
+            SandboxError::BackendFailure(format!("yq could not render XML output: {error}"))
+        })?;
+    Ok(())
+}
+
+fn xml_scalar_string(value: &Value) -> Result<String, SandboxError> {
+    Ok(match value {
+        Value::Null => String::new(),
+        Value::Bool(flag) => flag.to_string(),
+        Value::Number(number) => number.to_string(),
+        Value::String(text) => text.clone(),
+        _ => {
+            return Err(SandboxError::InvalidRequest(
+                "yq XML attributes and text must be scalar values".to_string(),
             ))
         }
     })
@@ -863,6 +1128,22 @@ mod tests {
                 .to_string(),
             r#"{"title":"hi"}"#
         );
+    }
+
+    #[test]
+    fn parses_and_renders_xml() {
+        assert_eq!(
+            xml_to_json(r#"<root><user id="7"><name>bert</name></user></root>"#)
+                .unwrap()
+                .to_string(),
+            r#"{"root":{"user":{"+@id":"7","name":"bert"}}}"#
+        );
+        let rendered = String::from_utf8(
+            render_xml_output(br#"{"root":{"user":{"+@id":"7","name":"bert"}}}"#.to_vec()).unwrap(),
+        )
+        .unwrap();
+        assert!(rendered.contains(r#"id="7""#));
+        assert!(rendered.contains("<name>bert</name>"));
     }
 
     #[test]

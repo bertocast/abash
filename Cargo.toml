@@ -21,6 +21,7 @@ base64 = "0.22"
 md-5 = "0.10"
 parking_lot = "0.12"
 pyo3 = { version = "0.22", features = ["extension-module"] }
+quick-xml = "0.39.2"
 regex = "1.12"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 flate2 = "1.1.9"
