@@ -513,6 +513,24 @@ async def test_argv_mode_awk_supports_begin_end_vars_and_accumulators() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_awk_supports_regex_literals_and_printf() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/people.csv", "bert,core,2\nana,product,9\n")
+        result = await bash.exec(
+            [
+                "awk",
+                "-F",
+                ",",
+                '$2 ~ /core/ { printf "%s:%d", $1, $3 }',
+                "/workspace/people.csv",
+            ]
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "bert:2"
+
+
+@pytest.mark.anyio
 async def test_argv_mode_jq_supports_paths_slices_and_raw_output() -> None:
     async with Bash() as bash:
         result = await bash.exec(

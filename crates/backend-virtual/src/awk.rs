@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use abash_core::SandboxError;
+use regex::Regex;
 
 pub(crate) fn execute<F>(
     args: &[String],
@@ -41,6 +42,7 @@ enum RuleKind {
 
 enum AwkStmt {
     Print(Vec<AwkExpr>),
+    Printf(Vec<AwkExpr>),
     Assign {
         name: String,
         op: AssignOp,
@@ -62,6 +64,7 @@ enum AwkExpr {
     Counter(AwkCounter),
     Variable(String),
     StringLiteral(String),
+    RegexLiteral(String),
     NumberLiteral(f64),
     UnaryMinus(Box<AwkExpr>),
     Binary(Box<AwkExpr>, BinaryOp, Box<AwkExpr>),
@@ -86,7 +89,8 @@ enum BinaryOp {
     Le,
     And,
     Or,
-    Contains,
+    Match,
+    NotMatch,
 }
 
 struct AwkInput {
@@ -144,7 +148,7 @@ impl AwkValue {
 #[derive(Default)]
 struct RuntimeState {
     vars: BTreeMap<String, AwkValue>,
-    output: Vec<String>,
+    output: String,
 }
 
 fn parse_invocation(args: &[String]) -> Result<Invocation, SandboxError> {
@@ -340,6 +344,15 @@ fn parse_action_block(source: &str) -> Result<Vec<AwkStmt>, SandboxError> {
 
 fn parse_stmt(source: &str) -> Result<AwkStmt, SandboxError> {
     let source = source.trim();
+    if let Some(remainder) = source.strip_prefix("printf") {
+        let exprs = parse_print_exprs(remainder.trim())?;
+        if exprs.is_empty() {
+            return Err(SandboxError::InvalidRequest(
+                "awk printf requires a format string".to_string(),
+            ));
+        }
+        return Ok(AwkStmt::Printf(exprs));
+    }
     if let Some(remainder) = source.strip_prefix("print") {
         return Ok(AwkStmt::Print(parse_print_exprs(remainder.trim())?));
     }
@@ -442,6 +455,8 @@ impl<'a> ExprParser<'a> {
                 Some(BinaryOp::Eq)
             } else if self.consume("!=") {
                 Some(BinaryOp::Ne)
+            } else if self.consume("!~") {
+                Some(BinaryOp::NotMatch)
             } else if self.consume(">=") {
                 Some(BinaryOp::Ge)
             } else if self.consume("<=") {
@@ -451,7 +466,7 @@ impl<'a> ExprParser<'a> {
             } else if self.consume("<") {
                 Some(BinaryOp::Lt)
             } else if self.consume("~") {
-                Some(BinaryOp::Contains)
+                Some(BinaryOp::Match)
             } else {
                 None
             };
@@ -517,6 +532,9 @@ impl<'a> ExprParser<'a> {
         }
         if let Some(text) = self.parse_string()? {
             return Ok(AwkExpr::StringLiteral(text));
+        }
+        if let Some(pattern) = self.parse_regex()? {
+            return Ok(AwkExpr::RegexLiteral(pattern));
         }
         if self.consume("$0") {
             return Ok(AwkExpr::EntireLine);
@@ -601,6 +619,34 @@ impl<'a> ExprParser<'a> {
             .parse::<f64>()
             .map(Some)
             .map_err(|_| SandboxError::InvalidRequest("awk number literal is invalid".to_string()))
+    }
+
+    fn parse_regex(&mut self) -> Result<Option<String>, SandboxError> {
+        if self.peek_char() != Some('/') {
+            return Ok(None);
+        }
+        self.index += 1;
+        let mut pattern = String::new();
+        let mut escaped = false;
+        while let Some(ch) = self.peek_char() {
+            self.index += ch.len_utf8();
+            if escaped {
+                pattern.push(ch);
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => {
+                    escaped = true;
+                    pattern.push(ch);
+                }
+                '/' => return Ok(Some(pattern)),
+                other => pattern.push(other),
+            }
+        }
+        Err(SandboxError::InvalidRequest(
+            "awk regex literal is unterminated".to_string(),
+        ))
     }
 
     fn read_identifier(&mut self) -> String {
@@ -745,7 +791,7 @@ fn run_program(
     initial_vars: &BTreeMap<String, String>,
     delimiter: Option<char>,
     inputs: &[AwkInput],
-) -> Result<Vec<String>, SandboxError> {
+) -> Result<String, SandboxError> {
     let mut state = RuntimeState::default();
     for (name, value) in initial_vars {
         state.vars.insert(name.clone(), parsed_scalar(value));
@@ -841,7 +887,11 @@ fn execute_stmt(
             for expr in exprs {
                 rendered.push(eval_expr(expr, record, state)?.to_string_value());
             }
-            state.output.push(rendered.join(" "));
+            state.output.push_str(&rendered.join(" "));
+            state.output.push('\n');
+        }
+        AwkStmt::Printf(exprs) => {
+            state.output.push_str(&render_printf(exprs, record, state)?);
         }
         AwkStmt::Assign { name, op, expr } => {
             let right = eval_expr(expr, record, state)?;
@@ -868,6 +918,19 @@ fn execute_stmt(
         }
     }
     Ok(())
+}
+
+fn render_printf(
+    exprs: &[AwkExpr],
+    record: Option<&AwkRecord<'_>>,
+    state: &RuntimeState,
+) -> Result<String, SandboxError> {
+    let format = eval_expr(&exprs[0], record, state)?.to_string_value();
+    let args = exprs[1..]
+        .iter()
+        .map(|expr| eval_expr(expr, record, state))
+        .collect::<Result<Vec<_>, _>>()?;
+    format_awk_printf(&format, &args)
 }
 
 fn eval_expr(
@@ -914,56 +977,93 @@ fn eval_expr(
             }
         }
         AwkExpr::StringLiteral(value) => AwkValue::String(value.clone()),
+        AwkExpr::RegexLiteral(pattern) => AwkValue::Number(regex_matches(
+            record.map(|value| value.line).unwrap_or_default(),
+            pattern,
+        )? as i32 as f64),
         AwkExpr::NumberLiteral(value) => AwkValue::Number(*value),
         AwkExpr::UnaryMinus(value) => {
             AwkValue::Number(-eval_expr(value, record, state)?.to_number())
         }
-        AwkExpr::Binary(left, op, right) => {
-            let left = eval_expr(left, record, state)?;
-            let right = eval_expr(right, record, state)?;
-            match op {
-                BinaryOp::Add => AwkValue::Number(left.to_number() + right.to_number()),
-                BinaryOp::Sub => AwkValue::Number(left.to_number() - right.to_number()),
-                BinaryOp::Mul => AwkValue::Number(left.to_number() * right.to_number()),
-                BinaryOp::Div => AwkValue::Number(left.to_number() / right.to_number()),
-                BinaryOp::Eq => {
-                    AwkValue::Number(
-                        compare_values(&left, &right, |a, b| a == b, |a, b| a == b) as i32 as f64
-                    )
-                }
-                BinaryOp::Ne => {
-                    AwkValue::Number(
-                        compare_values(&left, &right, |a, b| a != b, |a, b| a != b) as i32 as f64
-                    )
-                }
-                BinaryOp::Gt => {
-                    AwkValue::Number(
-                        compare_values(&left, &right, |a, b| a > b, |a, b| a > b) as i32 as f64
-                    )
-                }
-                BinaryOp::Ge => {
-                    AwkValue::Number(
-                        compare_values(&left, &right, |a, b| a >= b, |a, b| a >= b) as i32 as f64
-                    )
-                }
-                BinaryOp::Lt => {
-                    AwkValue::Number(
-                        compare_values(&left, &right, |a, b| a < b, |a, b| a < b) as i32 as f64
-                    )
-                }
-                BinaryOp::Le => {
-                    AwkValue::Number(
-                        compare_values(&left, &right, |a, b| a <= b, |a, b| a <= b) as i32 as f64
-                    )
-                }
-                BinaryOp::And => AwkValue::Number((left.truthy() && right.truthy()) as i32 as f64),
-                BinaryOp::Or => AwkValue::Number((left.truthy() || right.truthy()) as i32 as f64),
-                BinaryOp::Contains => AwkValue::Number(
-                    left.to_string_value().contains(&right.to_string_value()) as i32 as f64,
-                ),
+        AwkExpr::Binary(left, op, right) => match op {
+            BinaryOp::Match | BinaryOp::NotMatch => {
+                let left = eval_expr(left, record, state)?;
+                let matched = match &**right {
+                    AwkExpr::RegexLiteral(pattern) => {
+                        regex_matches(&left.to_string_value(), pattern)?
+                    }
+                    other => left
+                        .to_string_value()
+                        .contains(&eval_expr(other, record, state)?.to_string_value()),
+                };
+                let matched = if matches!(op, BinaryOp::NotMatch) {
+                    !matched
+                } else {
+                    matched
+                };
+                AwkValue::Number(matched as i32 as f64)
             }
-        }
+            _ => {
+                let left = eval_expr(left, record, state)?;
+                let right = eval_expr(right, record, state)?;
+                match op {
+                    BinaryOp::Add => AwkValue::Number(left.to_number() + right.to_number()),
+                    BinaryOp::Sub => AwkValue::Number(left.to_number() - right.to_number()),
+                    BinaryOp::Mul => AwkValue::Number(left.to_number() * right.to_number()),
+                    BinaryOp::Div => AwkValue::Number(left.to_number() / right.to_number()),
+                    BinaryOp::Eq => {
+                        AwkValue::Number(
+                            compare_values(&left, &right, |a, b| a == b, |a, b| a == b) as i32
+                                as f64,
+                        )
+                    }
+                    BinaryOp::Ne => {
+                        AwkValue::Number(
+                            compare_values(&left, &right, |a, b| a != b, |a, b| a != b) as i32
+                                as f64,
+                        )
+                    }
+                    BinaryOp::Gt => {
+                        AwkValue::Number(
+                            compare_values(&left, &right, |a, b| a > b, |a, b| a > b) as i32 as f64
+                        )
+                    }
+                    BinaryOp::Ge => {
+                        AwkValue::Number(
+                            compare_values(&left, &right, |a, b| a >= b, |a, b| a >= b) as i32
+                                as f64,
+                        )
+                    }
+                    BinaryOp::Lt => {
+                        AwkValue::Number(
+                            compare_values(&left, &right, |a, b| a < b, |a, b| a < b) as i32 as f64
+                        )
+                    }
+                    BinaryOp::Le => {
+                        AwkValue::Number(
+                            compare_values(&left, &right, |a, b| a <= b, |a, b| a <= b) as i32
+                                as f64,
+                        )
+                    }
+                    BinaryOp::And => {
+                        AwkValue::Number((left.truthy() && right.truthy()) as i32 as f64)
+                    }
+                    BinaryOp::Or => {
+                        AwkValue::Number((left.truthy() || right.truthy()) as i32 as f64)
+                    }
+                    BinaryOp::Match | BinaryOp::NotMatch => unreachable!(),
+                }
+            }
+        },
     })
+}
+
+fn regex_matches(text: &str, pattern: &str) -> Result<bool, SandboxError> {
+    Ok(Regex::new(pattern)
+        .map_err(|error| {
+            SandboxError::InvalidRequest(format!("awk regex literal is invalid: {error}"))
+        })?
+        .is_match(text))
 }
 
 fn compare_values(
@@ -1001,11 +1101,74 @@ fn format_number(value: f64) -> String {
     }
 }
 
-fn render_output(lines: &[String]) -> Vec<u8> {
-    if lines.is_empty() {
+fn format_awk_printf(format: &str, args: &[AwkValue]) -> Result<String, SandboxError> {
+    let mut output = String::new();
+    let mut chars = format.chars().peekable();
+    let mut arg_index = 0usize;
+
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            output.push(ch);
+            continue;
+        }
+        if chars.peek() == Some(&'%') {
+            chars.next();
+            output.push('%');
+            continue;
+        }
+
+        let mut precision = None::<usize>;
+        if chars.peek() == Some(&'.') {
+            chars.next();
+            let digits = take_printf_digits(&mut chars);
+            if digits.is_empty() {
+                return Err(SandboxError::InvalidRequest(
+                    "awk printf precision is invalid".to_string(),
+                ));
+            }
+            precision = Some(digits.parse::<usize>().map_err(|_| {
+                SandboxError::InvalidRequest("awk printf precision is invalid".to_string())
+            })?);
+        }
+
+        let Some(specifier) = chars.next() else {
+            return Err(SandboxError::InvalidRequest(
+                "awk printf format is unterminated".to_string(),
+            ));
+        };
+        let value = args
+            .get(arg_index)
+            .cloned()
+            .unwrap_or(AwkValue::String(String::new()));
+        arg_index += 1;
+        match specifier {
+            's' => output.push_str(&value.to_string_value()),
+            'd' => output.push_str(&format!("{:.0}", value.to_number().trunc())),
+            'f' => output.push_str(&format!("{:.*}", precision.unwrap_or(6), value.to_number())),
+            other => {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "awk printf specifier is not supported: %{other}"
+                )))
+            }
+        }
+    }
+
+    Ok(output)
+}
+
+fn take_printf_digits(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+    let mut digits = String::new();
+    while chars.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+        digits.push(chars.next().unwrap());
+    }
+    digits
+}
+
+fn render_output(output: &str) -> Vec<u8> {
+    if output.is_empty() {
         Vec::new()
     } else {
-        format!("{}\n", lines.join("\n")).into_bytes()
+        output.as_bytes().to_vec()
     }
 }
 
@@ -1036,7 +1199,7 @@ mod tests {
         }];
 
         let output = run_program(&program, &BTreeMap::new(), Some(','), &inputs).unwrap();
-        assert_eq!(output, vec!["5".to_string()]);
+        assert_eq!(output, "5\n");
     }
 
     #[test]
@@ -1050,9 +1213,18 @@ mod tests {
         }];
 
         let output = run_program(&program, &vars, None, &inputs).unwrap();
-        assert_eq!(
-            output,
-            vec!["hello".to_string(), "/workspace/data.txt bert".to_string()]
-        );
+        assert_eq!(output, "hello\n/workspace/data.txt bert\n");
+    }
+
+    #[test]
+    fn supports_regex_literals_and_printf() {
+        let program = parse_program(r#"/core/ { printf "%s:%d", $1, $3 }"#).unwrap();
+        let inputs = vec![AwkInput {
+            filename: "/workspace/data.csv".to_string(),
+            text: "bert,core,2\nana,product,9\n".to_string(),
+        }];
+
+        let output = run_program(&program, &BTreeMap::new(), Some(','), &inputs).unwrap();
+        assert_eq!(output, "bert:2");
     }
 }
