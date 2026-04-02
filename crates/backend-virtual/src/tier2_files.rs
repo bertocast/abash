@@ -136,16 +136,62 @@ where
     Ok(format!("{}\n", rendered.join("\n")).into_bytes())
 }
 
-pub(crate) fn ln_parse(cwd: &str, args: &[String]) -> Result<(String, String), SandboxError> {
-    if args.len() != 3 || args[0] != "-s" {
+pub(crate) struct LnSpec {
+    pub symbolic: bool,
+    pub force: bool,
+    pub verbose: bool,
+    pub target_arg: String,
+    pub link_arg: String,
+    pub target_path: String,
+    pub link_path: String,
+}
+
+pub(crate) fn parse_ln(cwd: &str, args: &[String]) -> Result<LnSpec, SandboxError> {
+    let mut symbolic = false;
+    let mut force = false;
+    let mut verbose = false;
+    let mut index = 0usize;
+
+    while let Some(arg) = args.get(index) {
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if !arg.starts_with('-') || arg == "-" {
+            break;
+        }
+        for flag in arg[1..].chars() {
+            match flag {
+                's' => symbolic = true,
+                'f' => force = true,
+                'v' => verbose = true,
+                'n' => {}
+                _ => {
+                    return Err(SandboxError::InvalidRequest(format!(
+                        "ln flag is not supported: -{flag}"
+                    )));
+                }
+            }
+        }
+        index += 1;
+    }
+
+    let remaining = &args[index..];
+    if remaining.len() != 2 {
         return Err(SandboxError::InvalidRequest(
-            "ln currently supports only: ln -s TARGET LINK_NAME".to_string(),
+            "ln requires TARGET and LINK_NAME".to_string(),
         ));
     }
-    Ok((
-        resolve_sandbox_path(cwd, &args[1])?,
-        resolve_sandbox_path(cwd, &args[2])?,
-    ))
+
+    Ok(LnSpec {
+        symbolic,
+        force,
+        verbose,
+        target_arg: remaining[0].clone(),
+        link_arg: remaining[1].clone(),
+        target_path: resolve_sandbox_path(cwd, &remaining[0])?,
+        link_path: resolve_sandbox_path(cwd, &remaining[1])?,
+    })
 }
 
 #[derive(Clone)]

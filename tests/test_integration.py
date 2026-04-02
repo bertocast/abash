@@ -1332,6 +1332,42 @@ async def test_host_readwrite_ln_and_readlink_work_for_workspace_paths(tmp_path:
 
 
 @pytest.mark.anyio
+async def test_memory_mode_ln_creates_narrow_hard_links() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/original.txt", "hello")
+        linked = await bash.exec(["ln", "/workspace/original.txt", "/workspace/hardlink.txt"])
+        cat_result = await bash.exec(["cat", "/workspace/hardlink.txt"])
+
+    assert linked.exit_code == 0
+    assert cat_result.stdout == "hello"
+
+
+@pytest.mark.anyio
+async def test_host_readwrite_ln_creates_real_hard_links(tmp_path: Path) -> None:
+    workspace = tmp_path / "hardlink-workspace"
+    workspace.mkdir()
+    (workspace / "docs").mkdir()
+    (workspace / "docs" / "guide.txt").write_text("hello", encoding="utf-8")
+
+    async with Bash(
+        profile=ExecutionProfile.WORKSPACE,
+        filesystem_mode=FilesystemMode.HOST_READWRITE,
+        workspace_root=str(workspace),
+        writable_roots=["/workspace/docs"],
+    ) as bash:
+        linked = await bash.exec(
+            ["ln", "/workspace/docs/guide.txt", "/workspace/docs/guide-hard.txt"]
+        )
+        cat_result = await bash.exec(["cat", "/workspace/docs/guide-hard.txt"])
+
+    assert linked.exit_code == 0
+    assert cat_result.stdout == "hello"
+    assert (workspace / "docs" / "guide.txt").stat().st_ino == (
+        workspace / "docs" / "guide-hard.txt"
+    ).stat().st_ino
+
+
+@pytest.mark.anyio
 async def test_script_mode_rev_nl_tac_strings_fold_expand_and_unexpand_work() -> None:
     async with Bash() as bash:
         result = await bash.exec_script(

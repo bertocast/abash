@@ -422,6 +422,7 @@ pub trait SandboxFilesystem: Send {
     fn list_paths(&self) -> Result<Vec<String>, SandboxError>;
     fn read_link(&self, path: &str) -> Result<Option<String>, SandboxError>;
     fn create_symlink(&mut self, target: &str, link_path: &str) -> Result<(), SandboxError>;
+    fn create_hard_link(&mut self, target: &str, link_path: &str) -> Result<(), SandboxError>;
 }
 
 pub fn default_cwd_for_mode(mode: &FilesystemMode) -> &'static str {
@@ -575,6 +576,44 @@ impl VirtualFilesystem {
         Err(SandboxError::UnsupportedFeature(
             "symlinks are not supported in the bootstrap virtual filesystem".to_string(),
         ))
+    }
+
+    pub fn create_hard_link(&mut self, target: &str, link_path: &str) -> Result<(), SandboxError> {
+        let normalized_target = normalize_sandbox_path(target)?;
+        let normalized_link = normalize_sandbox_path(link_path)?;
+        if normalized_link == "/" || normalized_link == "/workspace" {
+            return Err(SandboxError::InvalidRequest(
+                "cannot create a hard link at the sandbox root".to_string(),
+            ));
+        }
+        if self.directories.contains(&normalized_target) {
+            return Err(SandboxError::InvalidRequest(format!(
+                "hard links are not allowed for directories: {normalized_target}"
+            )));
+        }
+        let contents = self.files.get(&normalized_target).cloned().ok_or_else(|| {
+            SandboxError::InvalidRequest(format!("path does not exist: {normalized_target}"))
+        })?;
+        if self.files.contains_key(&normalized_link) || self.directories.contains(&normalized_link)
+        {
+            return Err(SandboxError::InvalidRequest(format!(
+                "path already exists: {normalized_link}"
+            )));
+        }
+        let parent = Path::new(&normalized_link).parent().ok_or_else(|| {
+            SandboxError::InvalidRequest("hard link destination must have a parent".to_string())
+        })?;
+        let parent = parent.to_string_lossy().to_string();
+        if !self.directories.contains(&parent) {
+            return Err(SandboxError::InvalidRequest(format!(
+                "parent directory does not exist: {parent}"
+            )));
+        }
+
+        self.files.insert(normalized_link.clone(), contents);
+        let mode = self.mode_bits(&normalized_target)?;
+        self.modes.insert(normalized_link, mode);
+        Ok(())
     }
 
     pub fn delete_path(&mut self, path: &str, recursive: bool) -> Result<(), SandboxError> {
@@ -736,6 +775,10 @@ impl SandboxFilesystem for MemoryFilesystem {
             "symlinks are not supported in memory mode".to_string(),
         ))
     }
+
+    fn create_hard_link(&mut self, target: &str, link_path: &str) -> Result<(), SandboxError> {
+        self.virtual_fs.create_hard_link(target, link_path)
+    }
 }
 
 struct HostReadonlyFilesystem {
@@ -809,6 +852,12 @@ impl SandboxFilesystem for HostReadonlyFilesystem {
     fn create_symlink(&mut self, _target: &str, _link_path: &str) -> Result<(), SandboxError> {
         Err(SandboxError::PolicyDenied(
             "host_readonly mode does not allow symlink creation".to_string(),
+        ))
+    }
+
+    fn create_hard_link(&mut self, _target: &str, _link_path: &str) -> Result<(), SandboxError> {
+        Err(SandboxError::PolicyDenied(
+            "host_readonly mode does not allow hard-link creation".to_string(),
         ))
     }
 }
@@ -1019,6 +1068,12 @@ impl SandboxFilesystem for HostCowFilesystem {
             "host_cow mode does not support creating symlinks".to_string(),
         ))
     }
+
+    fn create_hard_link(&mut self, _target: &str, _link_path: &str) -> Result<(), SandboxError> {
+        Err(SandboxError::UnsupportedFeature(
+            "host_cow mode does not support hard-link creation".to_string(),
+        ))
+    }
 }
 
 struct HostReadwriteFilesystem {
@@ -1206,6 +1261,63 @@ impl SandboxFilesystem for HostReadwriteFilesystem {
                 "symlink creation is supported only on unix hosts".to_string(),
             ))
         }
+    }
+
+    fn create_hard_link(&mut self, target: &str, link_path: &str) -> Result<(), SandboxError> {
+        let normalized_link = normalize_workspace_path(link_path)?;
+        if normalized_link == "/workspace" {
+            return Err(SandboxError::InvalidRequest(
+                "cannot create a hard link at the workspace root".to_string(),
+            ));
+        }
+        self.ensure_writable(&normalized_link)?;
+
+        let link_candidate = host_target_for_write(&self.root, &normalized_link, false)?;
+        if fs::symlink_metadata(&link_candidate).is_ok() {
+            return Err(SandboxError::InvalidRequest(format!(
+                "path already exists: {normalized_link}"
+            )));
+        }
+
+        let normalized_target = normalize_workspace_path(target)?;
+        if normalized_target == "/workspace" {
+            return Err(SandboxError::InvalidRequest(
+                "hard links are not allowed for directories: /workspace".to_string(),
+            ));
+        }
+        let raw_target = self
+            .root
+            .join(sandbox_to_workspace_relative(&normalized_target)?);
+        validate_existing_ancestor(&self.root, &raw_target, false)?;
+        let metadata = fs::symlink_metadata(&raw_target).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                SandboxError::InvalidRequest(format!("path does not exist: {normalized_target}"))
+            } else {
+                SandboxError::BackendFailure(format!("failed to inspect path: {error}"))
+            }
+        })?;
+
+        if metadata.is_dir() {
+            return Err(SandboxError::InvalidRequest(format!(
+                "hard links are not allowed for directories: {normalized_target}"
+            )));
+        }
+
+        let target_candidate = if metadata.file_type().is_symlink() {
+            let canonical = fs::canonicalize(&raw_target).map_err(|error| {
+                SandboxError::PolicyDenied(format!(
+                    "host-backed path could not be resolved safely: {error}"
+                ))
+            })?;
+            ensure_within_root(&self.root, &canonical)?;
+            canonical
+        } else {
+            raw_target
+        };
+
+        fs::hard_link(&target_candidate, &link_candidate).map_err(|error| {
+            SandboxError::BackendFailure(format!("failed to create hard link: {error}"))
+        })
     }
 }
 

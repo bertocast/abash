@@ -51,7 +51,7 @@ Implemented today on the virtual backend:
 - encoding/checksums: `base64`, `md5sum`, `sha1sum`, `sha256sum`
 
 Most commands are intentionally partial implementations. `abash` aims for safe, useful workflows first, not full GNU/bash parity.
-Recent behavior lift: `grep` now supports regex search plus narrow `-E`, `-F`, `-i`, `-n`, `-v`, `-c`, `-l`, and `-r`.
+Recent behavior lifts: `grep` now supports regex search plus narrow `-E`, `-F`, `-i`, `-n`, `-v`, `-c`, `-l`, and `-r`; `ln` now creates hard links by default and still supports `-s` for symlinks.
 
 Command-name parity work is tracked in [docs/pending_commands.md](docs/pending_commands.md). Broader follow-up work is tracked in [docs/roadmap.md](docs/roadmap.md).
 

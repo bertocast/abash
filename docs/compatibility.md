@@ -60,7 +60,7 @@
 - narrow `du` with `-a`, `-h`, `-s`, `-c`, and `--max-depth=N`: supported
 - narrow `file` detection for symlink/directory/empty/text/data: supported
 - narrow `readlink` with sanitized workspace-relative targets: supported
-- narrow `ln` with only `-s` and filesystem-mode-dependent symlink creation: supported
+- narrow `ln` with hard links by default plus `-s`, optional `-f`, `-n`, and `-v`: supported
 - narrow `jq` with `.`, `.key`, `.[index]`, `.[start:end]`, `.[]`, `|`, `,`, and `-r` / `-c` / `-e` / `-s` / `-n`: supported
 - narrow `yq` with YAML default input/output, optional `-p json`, `-o json`, and jq-lite filters: supported
 - narrow `sqlite3` with `:memory:` or file-backed databases, SQL from arg or stdin, and `-json` / `-csv` / `-header`: supported

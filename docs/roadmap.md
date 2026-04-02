@@ -114,14 +114,13 @@ Recommended next step:
 
 Recommended order:
 
-1. hard links in `ln`
-2. multi-mount filesystem composition
-3. lazy file providers
+1. multi-mount filesystem composition
+2. lazy file providers
 
 Rationale:
 
-- hard-link support closes a concrete command-behavior mismatch
-- multi-mount composition is a larger architecture step and should be deliberate
+- hard-link support is landed
+- multi-mount composition is the next larger filesystem step and should be deliberate
 
 ## Extension Surface
 
@@ -158,7 +157,7 @@ Recommended order:
 
 If the goal is to move closer to `just-bash` with high payoff and controlled scope:
 
-1. hard links in `ln`
-2. execution-state decision
-3. custom command registration
-4. `jq` depth
+1. execution-state decision
+2. custom command registration
+3. `jq` depth
+4. multi-mount filesystem composition

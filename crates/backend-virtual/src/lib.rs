@@ -2492,9 +2492,46 @@ impl VirtualSession {
         args: Vec<String>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
-        let (target, link_path) = tier2_files::ln_parse(cwd, &args)?;
-        self.filesystem.create_symlink(&target, &link_path)?;
-        Ok(ExecutionResult::success(Vec::new(), metadata))
+        let spec = match tier2_files::parse_ln(cwd, &args) {
+            Ok(spec) => spec,
+            Err(error) => return Ok(ln_error_result(error.to_string(), metadata)),
+        };
+
+        if self.filesystem.exists(&spec.link_path)? {
+            if spec.force {
+                if let Err(error) = self.filesystem.delete_path(&spec.link_path, false) {
+                    return Ok(ln_error_result(
+                        format!("cannot remove '{}': {error}", spec.link_arg),
+                        metadata,
+                    ));
+                }
+            } else {
+                return Ok(ln_error_result(
+                    format!("failed to create link '{}': File exists", spec.link_arg),
+                    metadata,
+                ));
+            }
+        }
+
+        let created = if spec.symbolic {
+            self.filesystem
+                .create_symlink(&spec.target_path, &spec.link_path)
+        } else {
+            self.filesystem
+                .create_hard_link(&spec.target_path, &spec.link_path)
+        };
+
+        if let Err(error) = created {
+            return Ok(ln_error_result(error.to_string(), metadata));
+        }
+
+        let stdout = if spec.verbose {
+            format!("'{}' -> '{}'\n", spec.link_arg, spec.target_arg).into_bytes()
+        } else {
+            Vec::new()
+        };
+
+        Ok(ExecutionResult::success(stdout, metadata))
     }
 
     fn run_rev(
@@ -3415,6 +3452,17 @@ fn should_run_step(op: Option<&ChainOp>, last_result: Option<&ExecutionResult>) 
         (Some(ChainOp::AndIf), Some(result)) => result.exit_code == 0,
         (Some(ChainOp::OrIf), Some(result)) => result.exit_code != 0,
         (Some(ChainOp::AndIf | ChainOp::OrIf), None) => true,
+    }
+}
+
+fn ln_error_result(message: String, metadata: BTreeMap<String, String>) -> ExecutionResult {
+    ExecutionResult {
+        stdout: Vec::new(),
+        stderr: format!("ln: {message}\n").into_bytes(),
+        exit_code: 1,
+        termination_reason: TerminationReason::Exited,
+        error: None,
+        metadata,
     }
 }
 
