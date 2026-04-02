@@ -10,11 +10,22 @@ use toml::Value as TomlValue;
 
 use crate::jq;
 
+pub(crate) struct Execution {
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) exit_code: i32,
+    pub(crate) writeback: Option<Writeback>,
+}
+
+pub(crate) struct Writeback {
+    pub(crate) path: String,
+    pub(crate) contents: Vec<u8>,
+}
+
 pub(crate) fn execute<F>(
     args: &[String],
     stdin: Vec<u8>,
     mut read_file: F,
-) -> Result<jq::Execution, SandboxError>
+) -> Result<Execution, SandboxError>
 where
     F: FnMut(&str) -> Result<Vec<u8>, SandboxError>,
 {
@@ -31,33 +42,35 @@ where
         ))
     })?;
 
-    if spec.output_format == Format::Json || spec.raw_output {
-        return Ok(result);
+    let stdout = if spec.output_format == Format::Json || spec.raw_output {
+        result.stdout
+    } else {
+        match spec.output_format {
+            Format::Json => result.stdout,
+            Format::Yaml => render_yaml_output(result.stdout)?,
+            Format::Toml => render_toml_output(result.stdout)?,
+            Format::Csv => render_csv_output(result.stdout)?,
+            Format::Ini => render_ini_output(result.stdout)?,
+            Format::Xml => render_xml_output(result.stdout)?,
+        }
+    };
+
+    if spec.inplace {
+        return Ok(Execution {
+            stdout: Vec::new(),
+            exit_code: result.exit_code,
+            writeback: Some(Writeback {
+                path: inplace_path(&spec)?,
+                contents: stdout,
+            }),
+        });
     }
 
-    match spec.output_format {
-        Format::Json => Ok(result),
-        Format::Yaml => Ok(jq::Execution {
-            stdout: render_yaml_output(result.stdout)?,
-            exit_code: result.exit_code,
-        }),
-        Format::Toml => Ok(jq::Execution {
-            stdout: render_toml_output(result.stdout)?,
-            exit_code: result.exit_code,
-        }),
-        Format::Csv => Ok(jq::Execution {
-            stdout: render_csv_output(result.stdout)?,
-            exit_code: result.exit_code,
-        }),
-        Format::Ini => Ok(jq::Execution {
-            stdout: render_ini_output(result.stdout)?,
-            exit_code: result.exit_code,
-        }),
-        Format::Xml => Ok(jq::Execution {
-            stdout: render_xml_output(result.stdout)?,
-            exit_code: result.exit_code,
-        }),
-    }
+    Ok(Execution {
+        stdout,
+        exit_code: result.exit_code,
+        writeback: None,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +87,7 @@ struct Invocation {
     input_format: Format,
     input_format_explicit: bool,
     output_format: Format,
+    inplace: bool,
     raw_output: bool,
     compact_output: bool,
     exit_status: bool,
@@ -88,6 +102,7 @@ fn parse_invocation(args: &[String]) -> Result<Invocation, SandboxError> {
     let mut input_format = Format::Yaml;
     let mut input_format_explicit = false;
     let mut output_format = Format::Yaml;
+    let mut inplace = false;
     let mut raw_output = false;
     let mut compact_output = false;
     let mut exit_status = false;
@@ -126,6 +141,7 @@ fn parse_invocation(args: &[String]) -> Result<Invocation, SandboxError> {
             value if value.starts_with("--output-format=") => {
                 output_format = parse_format(&value["--output-format=".len()..])?;
             }
+            "-i" | "--inplace" => inplace = true,
             "-r" | "--raw-output" => raw_output = true,
             "-c" | "--compact-output" => compact_output = true,
             "-e" | "--exit-status" => exit_status = true,
@@ -141,6 +157,7 @@ fn parse_invocation(args: &[String]) -> Result<Invocation, SandboxError> {
             value if value.starts_with('-') && value.len() > 1 => {
                 for short in value[1..].chars() {
                     match short {
+                        'i' => inplace = true,
                         'r' => raw_output = true,
                         'c' => compact_output = true,
                         'e' => exit_status = true,
@@ -170,6 +187,7 @@ fn parse_invocation(args: &[String]) -> Result<Invocation, SandboxError> {
         input_format,
         input_format_explicit,
         output_format,
+        inplace,
         raw_output,
         compact_output,
         exit_status,
@@ -192,6 +210,21 @@ fn parse_format(value: &str) -> Result<Format, SandboxError> {
         other => Err(SandboxError::InvalidRequest(format!(
             "yq format is not supported: {other}"
         ))),
+    }
+}
+
+fn inplace_path(spec: &Invocation) -> Result<String, SandboxError> {
+    match spec.paths.as_slice() {
+        [path] if path != "-" => Ok(path.clone()),
+        [] => Err(SandboxError::InvalidRequest(
+            "yq -i requires a file argument".to_string(),
+        )),
+        [path] if path == "-" => Err(SandboxError::InvalidRequest(
+            "yq -i does not support stdin".to_string(),
+        )),
+        _ => Err(SandboxError::InvalidRequest(
+            "yq -i currently supports exactly one file argument".to_string(),
+        )),
     }
 }
 
@@ -1144,6 +1177,25 @@ mod tests {
         .unwrap();
         assert!(rendered.contains(r#"id="7""#));
         assert!(rendered.contains("<name>bert</name>"));
+    }
+
+    #[test]
+    fn parses_inplace_and_rejects_stdin_targets() {
+        let spec = parse_invocation(&[
+            "-i".to_string(),
+            ".name".to_string(),
+            "/tmp/data.yaml".to_string(),
+        ])
+        .unwrap();
+        assert!(spec.inplace);
+        assert_eq!(inplace_path(&spec).unwrap(), "/tmp/data.yaml");
+
+        let err =
+            parse_invocation(&["-i".to_string(), ".name".to_string(), "-".to_string()]).unwrap();
+        assert_eq!(
+            inplace_path(&err).unwrap_err().to_string(),
+            "invalid request: yq -i does not support stdin"
+        );
     }
 
     #[test]

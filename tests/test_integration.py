@@ -724,6 +724,29 @@ async def test_argv_mode_yq_supports_xml_input_and_output() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_yq_supports_inplace_writes() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/data.yaml", "name: bert\ncount: 1\n")
+        result = await bash.exec(["yq", "-i", '.name = "ana"', "/workspace/data.yaml"])
+        updated = await bash.read_file("/workspace/data.yaml")
+
+    assert result.exit_code == 0
+    assert result.stdout == ""
+    assert "name: ana" in updated
+
+
+@pytest.mark.anyio
+async def test_argv_mode_yq_inplace_requires_real_file() -> None:
+    async with Bash() as bash:
+        result = await bash.exec(["yq", "-i", ".name"], stdin="name: bert\n")
+
+    assert result.exit_code == 1
+    assert result.error is not None
+    assert result.error.kind.value == "invalid_request"
+    assert "requires a file argument" in result.error.message
+
+
+@pytest.mark.anyio
 async def test_script_mode_yq_works_in_pipelines_without_globbing_filter() -> None:
     async with Bash() as bash:
         await bash.write_file(

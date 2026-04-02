@@ -16,6 +16,10 @@ pub(crate) enum Filter {
     Array(Box<Filter>),
     Object(Vec<ObjectEntry>),
     Call(FunctionCall),
+    Assign {
+        path: PathExpr,
+        value: Box<Filter>,
+    },
     Binary {
         left: Box<Filter>,
         op: BinaryOp,
@@ -127,6 +131,13 @@ fn eval_filter(filter: &Filter, input: &Value) -> Vec<Value> {
             vec![Value::Object(object)]
         }
         Filter::Call(call) => eval_call(call, input),
+        Filter::Assign { path, value } => {
+            let replacement = eval_filter(value, input)
+                .into_iter()
+                .next()
+                .unwrap_or(Value::Null);
+            vec![assign_path_value(input, &path.ops, replacement)]
+        }
         Filter::Binary { left, op, right } => {
             let left = eval_filter(left, input)
                 .into_iter()
@@ -379,6 +390,51 @@ fn normalize_bound(bound: isize, length: isize) -> isize {
     resolved.clamp(0, length)
 }
 
+fn assign_path_value(input: &Value, ops: &[PathOp], replacement: Value) -> Value {
+    let Some((head, tail)) = ops.split_first() else {
+        return replacement;
+    };
+    match head {
+        PathOp::Key(key) => {
+            let mut map = match input {
+                Value::Object(existing) => existing.clone(),
+                _ => Map::new(),
+            };
+            let current = map.get(key).cloned().unwrap_or(Value::Null);
+            map.insert(key.clone(), assign_path_value(&current, tail, replacement));
+            Value::Object(map)
+        }
+        PathOp::Index(index) => {
+            let Some(resolved) = resolve_assignment_index(input, *index) else {
+                return input.clone();
+            };
+            let mut items = match input {
+                Value::Array(existing) => existing.clone(),
+                _ => Vec::new(),
+            };
+            if resolved >= items.len() {
+                items.resize(resolved + 1, Value::Null);
+            }
+            let current = items.get(resolved).cloned().unwrap_or(Value::Null);
+            items[resolved] = assign_path_value(&current, tail, replacement);
+            Value::Array(items)
+        }
+        PathOp::Slice(_, _) | PathOp::Iterate => input.clone(),
+    }
+}
+
+fn resolve_assignment_index(input: &Value, index: isize) -> Option<usize> {
+    let len = match input {
+        Value::Array(items) => items.len(),
+        _ => 0,
+    };
+    if index >= 0 {
+        Some(index as usize)
+    } else {
+        normalized_index(len, index)
+    }
+}
+
 struct Parser<'a> {
     source: &'a str,
     index: usize,
@@ -390,7 +446,36 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_filter(&mut self) -> Result<Filter, SandboxError> {
-        self.parse_pipe()
+        self.parse_assignment()
+    }
+
+    fn parse_assignment(&mut self) -> Result<Filter, SandboxError> {
+        let filter = self.parse_pipe()?;
+        self.skip_ws();
+        if !self.source[self.index..].starts_with('=')
+            || self.source[self.index..].starts_with("==")
+        {
+            return Ok(filter);
+        }
+        self.index += 1;
+        let Filter::Path(path) = filter else {
+            return Err(SandboxError::InvalidRequest(
+                "jq assignment target must be a direct path".to_string(),
+            ));
+        };
+        if path
+            .ops
+            .iter()
+            .any(|op| matches!(op, PathOp::Slice(_, _) | PathOp::Iterate))
+        {
+            return Err(SandboxError::InvalidRequest(
+                "jq assignment target is not supported".to_string(),
+            ));
+        }
+        Ok(Filter::Assign {
+            path,
+            value: Box::new(self.parse_assignment()?),
+        })
     }
 
     fn parse_pipe(&mut self) -> Result<Filter, SandboxError> {
@@ -839,5 +924,15 @@ mod tests {
         let program = parse_program(r#".root.user["+@id"]"#).unwrap();
         let input = json!({"root": {"user": {"+@id": "7"}}});
         assert_eq!(run_program(&program, &[input]), vec![json!("7")]);
+    }
+
+    #[test]
+    fn supports_direct_path_assignment() {
+        let program = parse_program(".config.port = 8080").unwrap();
+        let input = json!({"config": {"host": "localhost"}});
+        assert_eq!(
+            run_program(&program, &[input]),
+            vec![json!({"config": {"host": "localhost", "port": 8080.0}})]
+        );
     }
 }

@@ -62,21 +62,21 @@ Many commands now exist by name in both projects, but `just-bash` is still broad
 
 Highest-priority work:
 
-- `yq`: in-place surface beyond the current YAML/JSON/TOML/CSV/INI/XML/front-matter slice
-- `awk`: regex literals, `printf`, arrays, and control-flow/runtime surface beyond the current stateful core
 - `xan`: reshape/aggregation/data-conversion subcommands beyond the current core/column/row slice
+- `awk`: regex literals, `printf`, arrays, and control-flow/runtime surface beyond the current stateful core
+- `yq`: richer in-place/editing semantics beyond the current narrow file-rewrite surface
 
 Recommended order:
 
-1. `yq`
-2. `xan`
-3. `awk`
+1. `xan`
+2. `awk`
+3. `yq`
 
 Rationale:
 
-- `grep`, `ln`, execution reset-mode, a broader `jq` slice, YAML/JSON/TOML/CSV/INI/XML/front-matter `yq`, the first broader `xan` subcommand wave, and a stateful `awk` core are landed; `yq` still has the clearest remaining data-workflow payoff because in-place editing is still absent
+- `grep`, `ln`, execution reset-mode, a broader `jq` slice with direct path assignment, YAML/JSON/TOML/CSV/INI/XML/front-matter `yq`, narrow `yq -i`, the first broader `xan` subcommand wave, and a stateful `awk` core are landed
 - `jq` and `yq` affect high-value agent data workflows
-- `xan` and `awk` are larger interpreter-style expansions and should follow clearer wins
+- `xan` and `awk` now hold the clearest remaining behavior payoff
 
 ## JavaScript Runtime
 

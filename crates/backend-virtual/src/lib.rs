@@ -2300,6 +2300,11 @@ impl VirtualSession {
             let resolved = resolve_sandbox_path(cwd, path)?;
             self.filesystem.read_file(&resolved)
         })?;
+        if let Some(writeback) = result.writeback {
+            let resolved = resolve_sandbox_path(cwd, &writeback.path)?;
+            self.filesystem
+                .write_file(&resolved, writeback.contents, false)?;
+        }
         Ok(ExecutionResult {
             stdout: result.stdout,
             stderr: Vec::new(),
