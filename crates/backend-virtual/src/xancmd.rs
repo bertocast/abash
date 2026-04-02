@@ -417,6 +417,16 @@ where
                 .collect::<Vec<_>>();
             Ok(text_result(format_csv(&headers, &rows)))
         }
+        XanCommand::Agg { expr, input } => {
+            let table = read_table(cwd, input.as_deref(), stdin, &mut read_file)?;
+            let specs = parse_agg_specs(&expr, &table.headers)?;
+            let headers = specs
+                .iter()
+                .map(|spec| spec.alias.clone())
+                .collect::<Vec<_>>();
+            let row = render_agg_row(&table.rows, &specs);
+            Ok(text_result(format_csv(&headers, &[row])))
+        }
         XanCommand::Filter {
             expression,
             invert,
@@ -524,6 +534,10 @@ enum XanCommand {
         select: Option<String>,
         input: Option<String>,
     },
+    Agg {
+        expr: String,
+        input: Option<String>,
+    },
     Filter {
         expression: String,
         invert: bool,
@@ -565,6 +579,7 @@ fn parse_command(args: &[String]) -> Result<XanCommand, SandboxError> {
         "top" => parse_top(&args[1..]),
         "frequency" | "freq" => parse_frequency(&args[1..]),
         "stats" => parse_stats(&args[1..]),
+        "agg" => parse_agg(&args[1..]),
         "filter" => parse_filter(&args[1..]),
         value => Err(SandboxError::InvalidRequest(format!(
             "xan subcommand is not supported: {value}"
@@ -1295,6 +1310,34 @@ fn parse_stats(args: &[String]) -> Result<XanCommand, SandboxError> {
     Ok(XanCommand::Stats { select, input })
 }
 
+fn parse_agg(args: &[String]) -> Result<XanCommand, SandboxError> {
+    let mut expr = None;
+    let mut input = None;
+
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(XanCommand::Help),
+            _ if arg.starts_with('-') => {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "xan agg flag is not supported: {arg}"
+                )))
+            }
+            _ if expr.is_none() => expr = Some(arg.clone()),
+            _ if input.is_none() => input = Some(arg.clone()),
+            _ => {
+                return Err(SandboxError::InvalidRequest(
+                    "xan agg accepts one expression and at most one input".to_string(),
+                ))
+            }
+        }
+    }
+
+    let expr = expr.ok_or_else(|| {
+        SandboxError::InvalidRequest("xan agg requires an aggregation expression".to_string())
+    })?;
+    Ok(XanCommand::Agg { expr, input })
+}
+
 fn help_text() -> String {
     [
         "xan - narrow CSV toolkit",
@@ -1318,10 +1361,11 @@ fn help_text() -> String {
         "  xan top [COL] [-l N] [-R] [FILE]",
         "  xan frequency [-s COLS] [-g COL] [-l N] [--no-extra] [FILE]",
         "  xan stats [-s COLS] [FILE]",
+        "  xan agg EXPR [FILE]",
         "  xan filter [-v] [-l N] EXPR [FILE]",
         "",
         "Current scope:",
-        "  headers, count, head, tail, slice, reverse, behead, cat, select, drop, rename, enum, search, sort, dedup, top, frequency, stats, filter",
+        "  headers, count, head, tail, slice, reverse, behead, cat, select, drop, rename, enum, search, sort, dedup, top, frequency, stats, agg, filter",
     ]
     .join("\n")
 }
@@ -1591,6 +1635,186 @@ fn render_stats_row(field: &str, rows: &[Vec<String>], column: usize) -> Vec<Str
         max,
         mean,
     ]
+}
+
+enum AggFunc {
+    Count,
+    Sum,
+    Mean,
+    Min,
+    Max,
+    First,
+    Last,
+}
+
+struct AggSpec {
+    func: AggFunc,
+    column: Option<usize>,
+    alias: String,
+}
+
+fn parse_agg_specs(expr: &str, headers: &[String]) -> Result<Vec<AggSpec>, SandboxError> {
+    let mut specs = Vec::new();
+    for raw in split_agg_specs(expr)? {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (body, alias) = if let Some((left, right)) = trimmed.split_once(" as ") {
+            (left.trim(), right.trim().to_string())
+        } else {
+            (trimmed, trimmed.replace(['(', ')', ' '], "_"))
+        };
+        let open = body.find('(').ok_or_else(|| {
+            SandboxError::InvalidRequest(format!("xan agg expression is invalid: {trimmed}"))
+        })?;
+        let close = body.rfind(')').ok_or_else(|| {
+            SandboxError::InvalidRequest(format!("xan agg expression is invalid: {trimmed}"))
+        })?;
+        let func = match body[..open].trim() {
+            "count" => AggFunc::Count,
+            "sum" => AggFunc::Sum,
+            "mean" | "avg" => AggFunc::Mean,
+            "min" => AggFunc::Min,
+            "max" => AggFunc::Max,
+            "first" => AggFunc::First,
+            "last" => AggFunc::Last,
+            other => {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "xan agg function is not supported: {other}"
+                )))
+            }
+        };
+        let arg = body[open + 1..close].trim();
+        let column = if matches!(func, AggFunc::Count) && arg.is_empty() {
+            None
+        } else {
+            Some(*resolve_column_spec(arg, headers)?.first().ok_or_else(|| {
+                SandboxError::InvalidRequest(format!("xan agg column is invalid: {arg}"))
+            })?)
+        };
+        specs.push(AggSpec {
+            func,
+            column,
+            alias,
+        });
+    }
+    if specs.is_empty() {
+        return Err(SandboxError::InvalidRequest(
+            "xan agg requires at least one aggregation expression".to_string(),
+        ));
+    }
+    Ok(specs)
+}
+
+fn split_agg_specs(expr: &str) -> Result<Vec<&str>, SandboxError> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (index, ch) in expr.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(expr[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return Err(SandboxError::InvalidRequest(
+            "xan agg expression has unbalanced parentheses".to_string(),
+        ));
+    }
+    parts.push(expr[start..].trim());
+    Ok(parts)
+}
+
+fn render_agg_row(rows: &[Vec<String>], specs: &[AggSpec]) -> Vec<String> {
+    specs
+        .iter()
+        .map(|spec| render_agg_value(rows, spec))
+        .collect()
+}
+
+fn render_agg_value(rows: &[Vec<String>], spec: &AggSpec) -> String {
+    match spec.func {
+        AggFunc::Count => rows.len().to_string(),
+        AggFunc::Sum => aggregate_numeric(rows, spec.column.unwrap(), |values| {
+            xan_format_number(values.iter().sum())
+        }),
+        AggFunc::Mean => aggregate_numeric(rows, spec.column.unwrap(), |values| {
+            xan_format_number(values.iter().sum::<f64>() / values.len() as f64)
+        }),
+        AggFunc::Min => {
+            if let Some(numbers) = numeric_values(rows, spec.column.unwrap()) {
+                numbers
+                    .iter()
+                    .copied()
+                    .reduce(f64::min)
+                    .map(xan_format_number)
+                    .unwrap_or_default()
+            } else {
+                string_values(rows, spec.column.unwrap())
+                    .into_iter()
+                    .min()
+                    .unwrap_or_default()
+            }
+        }
+        AggFunc::Max => {
+            if let Some(numbers) = numeric_values(rows, spec.column.unwrap()) {
+                numbers
+                    .iter()
+                    .copied()
+                    .reduce(f64::max)
+                    .map(xan_format_number)
+                    .unwrap_or_default()
+            } else {
+                string_values(rows, spec.column.unwrap())
+                    .into_iter()
+                    .max()
+                    .unwrap_or_default()
+            }
+        }
+        AggFunc::First => rows
+            .first()
+            .and_then(|row| row.get(spec.column.unwrap()).cloned())
+            .unwrap_or_default(),
+        AggFunc::Last => rows
+            .last()
+            .and_then(|row| row.get(spec.column.unwrap()).cloned())
+            .unwrap_or_default(),
+    }
+}
+
+fn aggregate_numeric(
+    rows: &[Vec<String>],
+    column: usize,
+    render: impl Fn(Vec<f64>) -> String,
+) -> String {
+    numeric_values(rows, column).map(render).unwrap_or_default()
+}
+
+fn numeric_values(rows: &[Vec<String>], column: usize) -> Option<Vec<f64>> {
+    let values = rows
+        .iter()
+        .map(|row| row.get(column).cloned().unwrap_or_default())
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        return Some(Vec::new());
+    }
+    values
+        .into_iter()
+        .map(|value| value.parse::<f64>())
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
+}
+
+fn string_values(rows: &[Vec<String>], column: usize) -> Vec<String> {
+    rows.iter()
+        .map(|row| row.get(column).cloned().unwrap_or_default())
+        .collect()
 }
 
 fn xan_format_number(value: f64) -> String {
@@ -1949,5 +2173,24 @@ mod tests {
         let row = vec!["bert".to_string(), "32".to_string()];
         assert!(numeric.matches(&row));
         assert!(stringy.matches(&row));
+    }
+
+    #[test]
+    fn agg_specs_render_numeric_rows() {
+        let headers = vec!["name".to_string(), "score".to_string()];
+        let specs = parse_agg_specs(
+            "count() as rows, sum(score) as total, mean(score) as avg",
+            &headers,
+        )
+        .unwrap();
+        let row = render_agg_row(
+            &[
+                vec!["bert".to_string(), "10".to_string()],
+                vec!["ana".to_string(), "30".to_string()],
+                vec!["cami".to_string(), "30".to_string()],
+            ],
+            &specs,
+        );
+        assert_eq!(row, vec!["3", "70", "23.333333333333332"]);
     }
 }

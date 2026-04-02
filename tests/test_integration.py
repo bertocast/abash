@@ -1213,6 +1213,26 @@ async def test_argv_mode_xan_frequency_and_stats() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_xan_agg_supports_count_sum_and_mean() -> None:
+    async with Bash() as bash:
+        await bash.write_file(
+            "/workspace/data.csv",
+            "team,score\ncore,10\ncore,30\ngrowth,30\n",
+        )
+        result = await bash.exec(
+            [
+                "xan",
+                "agg",
+                "count() as rows, sum(score) as total, mean(score) as avg",
+                "/workspace/data.csv",
+            ]
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "rows,total,avg\n3,70,23.333333333333332\n"
+
+
+@pytest.mark.anyio
 async def test_script_mode_xan_preserves_column_globs() -> None:
     async with Bash() as bash:
         await bash.write_file(
