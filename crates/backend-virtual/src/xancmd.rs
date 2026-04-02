@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use abash_core::{resolve_sandbox_path, SandboxError};
 
@@ -322,6 +322,101 @@ where
             rows.truncate(limit);
             Ok(text_result(format_csv(&table.headers, &rows)))
         }
+        XanCommand::Frequency {
+            select,
+            groupby,
+            limit,
+            no_extra,
+            input,
+        } => {
+            let table = read_table(cwd, input.as_deref(), stdin, &mut read_file)?;
+            let group_column = match groupby {
+                Some(spec) => Some(
+                    *resolve_column_spec(&spec, &table.headers)?
+                        .first()
+                        .ok_or_else(|| {
+                            SandboxError::InvalidRequest(
+                                "xan frequency requires a group column".to_string(),
+                            )
+                        })?,
+                ),
+                None => None,
+            };
+            let target_columns = if let Some(spec) = select {
+                resolve_column_spec(&spec, &table.headers)?
+            } else {
+                (0..table.headers.len())
+                    .filter(|index| Some(*index) != group_column)
+                    .collect::<Vec<_>>()
+            };
+            let headers = if group_column.is_some() {
+                vec![
+                    "field".to_string(),
+                    "group".to_string(),
+                    "value".to_string(),
+                    "count".to_string(),
+                ]
+            } else {
+                vec![
+                    "field".to_string(),
+                    "value".to_string(),
+                    "count".to_string(),
+                ]
+            };
+            let mut rows = Vec::new();
+            for column in target_columns {
+                if let Some(group_column) = group_column {
+                    let mut groups = BTreeMap::<String, Vec<Vec<String>>>::new();
+                    for row in &table.rows {
+                        groups
+                            .entry(row[group_column].clone())
+                            .or_default()
+                            .push(row.clone());
+                    }
+                    for (group_value, group_rows) in groups {
+                        rows.extend(render_frequency_rows(
+                            &table.headers[column],
+                            Some(&group_value),
+                            group_rows,
+                            column,
+                            limit,
+                            no_extra,
+                        ));
+                    }
+                } else {
+                    rows.extend(render_frequency_rows(
+                        &table.headers[column],
+                        None,
+                        table.rows.clone(),
+                        column,
+                        limit,
+                        no_extra,
+                    ));
+                }
+            }
+            Ok(text_result(format_csv(&headers, &rows)))
+        }
+        XanCommand::Stats { select, input } => {
+            let table = read_table(cwd, input.as_deref(), stdin, &mut read_file)?;
+            let columns = if let Some(spec) = select {
+                resolve_column_spec(&spec, &table.headers)?
+            } else {
+                (0..table.headers.len()).collect::<Vec<_>>()
+            };
+            let headers = vec![
+                "field".to_string(),
+                "type".to_string(),
+                "count".to_string(),
+                "min".to_string(),
+                "max".to_string(),
+                "mean".to_string(),
+            ];
+            let rows = columns
+                .into_iter()
+                .map(|column| render_stats_row(&table.headers[column], &table.rows, column))
+                .collect::<Vec<_>>();
+            Ok(text_result(format_csv(&headers, &rows)))
+        }
         XanCommand::Filter {
             expression,
             invert,
@@ -418,6 +513,17 @@ enum XanCommand {
         reverse: bool,
         input: Option<String>,
     },
+    Frequency {
+        select: Option<String>,
+        groupby: Option<String>,
+        limit: Option<usize>,
+        no_extra: bool,
+        input: Option<String>,
+    },
+    Stats {
+        select: Option<String>,
+        input: Option<String>,
+    },
     Filter {
         expression: String,
         invert: bool,
@@ -457,6 +563,8 @@ fn parse_command(args: &[String]) -> Result<XanCommand, SandboxError> {
         "sort" => parse_sort(&args[1..]),
         "dedup" => parse_dedup(&args[1..]),
         "top" => parse_top(&args[1..]),
+        "frequency" | "freq" => parse_frequency(&args[1..]),
+        "stats" => parse_stats(&args[1..]),
         "filter" => parse_filter(&args[1..]),
         value => Err(SandboxError::InvalidRequest(format!(
             "xan subcommand is not supported: {value}"
@@ -1078,6 +1186,115 @@ fn parse_top(args: &[String]) -> Result<XanCommand, SandboxError> {
     })
 }
 
+fn parse_frequency(args: &[String]) -> Result<XanCommand, SandboxError> {
+    let mut select = None;
+    let mut groupby = None;
+    let mut limit = Some(10usize);
+    let mut no_extra = false;
+    let mut input = None;
+    let mut index = 0usize;
+
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-s" | "--select" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(SandboxError::InvalidRequest(
+                        "xan frequency missing value for -s".to_string(),
+                    ));
+                };
+                select = Some(value.clone());
+                index += 2;
+            }
+            "-g" | "--groupby" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(SandboxError::InvalidRequest(
+                        "xan frequency missing value for -g".to_string(),
+                    ));
+                };
+                groupby = Some(value.clone());
+                index += 2;
+            }
+            "-l" | "--limit" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(SandboxError::InvalidRequest(
+                        "xan frequency missing value for -l".to_string(),
+                    ));
+                };
+                limit = Some(parse_usize_flag("xan frequency limit", value)?);
+                index += 2;
+            }
+            "-A" | "--all" => {
+                limit = None;
+                index += 1;
+            }
+            "--no-extra" => {
+                no_extra = true;
+                index += 1;
+            }
+            "--help" | "-h" => return Ok(XanCommand::Help),
+            _ if arg.starts_with('-') => {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "xan frequency flag is not supported: {arg}"
+                )))
+            }
+            _ if input.is_none() => {
+                input = Some(arg.clone());
+                index += 1;
+            }
+            _ => {
+                return Err(SandboxError::InvalidRequest(
+                    "xan frequency accepts at most one input".to_string(),
+                ))
+            }
+        }
+    }
+
+    Ok(XanCommand::Frequency {
+        select,
+        groupby,
+        limit,
+        no_extra,
+        input,
+    })
+}
+
+fn parse_stats(args: &[String]) -> Result<XanCommand, SandboxError> {
+    let mut select = None;
+    let mut input = None;
+    let mut index = 0usize;
+
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-s" | "--select" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(SandboxError::InvalidRequest(
+                        "xan stats missing value for -s".to_string(),
+                    ));
+                };
+                select = Some(value.clone());
+                index += 2;
+            }
+            "--help" | "-h" => return Ok(XanCommand::Help),
+            _ if arg.starts_with('-') => {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "xan stats flag is not supported: {arg}"
+                )))
+            }
+            _ if input.is_none() => {
+                input = Some(arg.clone());
+                index += 1;
+            }
+            _ => {
+                return Err(SandboxError::InvalidRequest(
+                    "xan stats accepts at most one input".to_string(),
+                ))
+            }
+        }
+    }
+
+    Ok(XanCommand::Stats { select, input })
+}
+
 fn help_text() -> String {
     [
         "xan - narrow CSV toolkit",
@@ -1099,10 +1316,12 @@ fn help_text() -> String {
         "  xan sort [-s COL] [-N] [-R] [FILE]",
         "  xan dedup [-s COLS] [FILE]",
         "  xan top [COL] [-l N] [-R] [FILE]",
+        "  xan frequency [-s COLS] [-g COL] [-l N] [--no-extra] [FILE]",
+        "  xan stats [-s COLS] [FILE]",
         "  xan filter [-v] [-l N] EXPR [FILE]",
         "",
         "Current scope:",
-        "  headers, count, head, tail, slice, reverse, behead, cat, select, drop, rename, enum, search, sort, dedup, top, filter",
+        "  headers, count, head, tail, slice, reverse, behead, cat, select, drop, rename, enum, search, sort, dedup, top, frequency, stats, filter",
     ]
     .join("\n")
 }
@@ -1287,6 +1506,99 @@ fn column_value(headers: &[String], row: &[String], target: &str) -> String {
         .position(|header| header == target)
         .and_then(|index| row.get(index).cloned())
         .unwrap_or_default()
+}
+
+fn render_frequency_rows(
+    field: &str,
+    group: Option<&str>,
+    rows: Vec<Vec<String>>,
+    column: usize,
+    limit: Option<usize>,
+    no_extra: bool,
+) -> Vec<Vec<String>> {
+    let mut counts = BTreeMap::<String, usize>::new();
+    for row in rows {
+        let value = row.get(column).cloned().unwrap_or_default();
+        *counts.entry(value).or_insert(0) += 1;
+    }
+    let mut pairs = counts.into_iter().collect::<Vec<_>>();
+    pairs.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    if no_extra {
+        pairs.retain(|(value, _)| !value.is_empty());
+    }
+    if let Some(limit) = limit {
+        pairs.truncate(limit);
+    }
+    pairs
+        .into_iter()
+        .map(|(value, count)| {
+            let mut row = vec![field.to_string()];
+            if let Some(group) = group {
+                row.push(group.to_string());
+            }
+            row.push(if value.is_empty() {
+                "<empty>".to_string()
+            } else {
+                value
+            });
+            row.push(count.to_string());
+            row
+        })
+        .collect()
+}
+
+fn render_stats_row(field: &str, rows: &[Vec<String>], column: usize) -> Vec<String> {
+    let values = rows
+        .iter()
+        .map(|row| row.get(column).cloned().unwrap_or_default())
+        .collect::<Vec<_>>();
+    let numbers = values
+        .iter()
+        .map(|value| value.parse::<f64>())
+        .collect::<Result<Vec<_>, _>>();
+    let (ty, min, max, mean) = if let Ok(numbers) = numbers {
+        if numbers.is_empty() {
+            (
+                "String".to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+            )
+        } else {
+            let min = numbers.iter().copied().fold(f64::INFINITY, f64::min);
+            let max = numbers.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let mean = numbers.iter().sum::<f64>() / numbers.len() as f64;
+            (
+                "Number".to_string(),
+                xan_format_number(min),
+                xan_format_number(max),
+                xan_format_number(mean),
+            )
+        }
+    } else {
+        (
+            "String".to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+        )
+    };
+    vec![
+        field.to_string(),
+        ty,
+        values.len().to_string(),
+        min,
+        max,
+        mean,
+    ]
+}
+
+fn xan_format_number(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        value.to_string()
+    }
 }
 
 fn quote_csv_field(value: &str) -> String {

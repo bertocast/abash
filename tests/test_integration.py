@@ -1129,6 +1129,22 @@ async def test_argv_mode_xan_cat_supports_padded_headers() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_xan_frequency_and_stats() -> None:
+    async with Bash() as bash:
+        await bash.write_file(
+            "/workspace/data.csv",
+            "team,score\ncore,10\ncore,30\ngrowth,30\n",
+        )
+        frequency = await bash.exec(["xan", "frequency", "-s", "score", "-A", "/workspace/data.csv"])
+        stats = await bash.exec(["xan", "stats", "-s", "score", "/workspace/data.csv"])
+
+    assert frequency.exit_code == 0
+    assert frequency.stdout == "field,value,count\nscore,30,2\nscore,10,1\n"
+    assert stats.exit_code == 0
+    assert stats.stdout == "field,type,count,min,max,mean\nscore,Number,3,10,30,23.333333333333332\n"
+
+
+@pytest.mark.anyio
 async def test_script_mode_xan_preserves_column_globs() -> None:
     async with Bash() as bash:
         await bash.write_file(
