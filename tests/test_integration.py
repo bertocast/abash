@@ -86,6 +86,7 @@ class _CurlServer:
         self.httpd.server_close()
         self.thread.join(timeout=1)
 
+
 @pytest.mark.anyio
 async def test_allowed_command_round_trip() -> None:
     async with Bash() as bash:
@@ -448,9 +449,7 @@ async def test_script_mode_jq_works_in_pipelines_without_globbing_filter() -> No
 @pytest.mark.anyio
 async def test_argv_mode_jq_supports_compact_slurp_and_exit_status() -> None:
     async with Bash() as bash:
-        compact = await bash.exec(
-            ["jq", "-c", "-s", ".", "/workspace/stream.json"]
-        )
+        compact = await bash.exec(["jq", "-c", "-s", ".", "/workspace/stream.json"])
 
     assert compact.error is not None
     assert compact.error.kind is ErrorKind.INVALID_REQUEST
@@ -543,9 +542,7 @@ async def test_argv_mode_sqlite3_persists_file_backed_databases() -> None:
                 "CREATE TABLE users(id INT, name TEXT); INSERT INTO users VALUES(1,'ana')",
             ]
         )
-        result = await bash.exec(
-            ["sqlite3", "/workspace/demo.db", "SELECT * FROM users"]
-        )
+        result = await bash.exec(["sqlite3", "/workspace/demo.db", "SELECT * FROM users"])
 
     assert result.exit_code == 0
     assert result.stdout == "1|ana\n"
@@ -617,9 +614,7 @@ async def test_script_mode_tar_creates_lists_and_extracts_gzip_archives() -> Non
         )
         listed = await bash.exec_script("tar -tzf /workspace/demo.tar.gz")
         await bash.mkdir("/workspace/out", parents=True)
-        extracted = await bash.exec_script(
-            "tar -xzf /workspace/demo.tar.gz -C /workspace/out"
-        )
+        extracted = await bash.exec_script("tar -xzf /workspace/demo.tar.gz -C /workspace/out")
         restored = await bash.read_file("/workspace/out/demo.txt")
 
     assert created.exit_code == 0
@@ -780,9 +775,7 @@ async def test_argv_mode_xan_select_search_sort_and_filter() -> None:
             "name,age,city,vec_1,vec_2\nbert,32,madrid,1,2\nana,28,porto,3,4\nzoe,41,rome,5,6\n",
         )
         selected = await bash.exec(["xan", "select", "name,vec_*", "/workspace/data.csv"])
-        searched = await bash.exec(
-            ["xan", "search", "-s", "city", "^m", "/workspace/data.csv"]
-        )
+        searched = await bash.exec(["xan", "search", "-s", "city", "^m", "/workspace/data.csv"])
         sorted_result = await bash.exec(
             ["xan", "sort", "-s", "age", "-N", "-R", "/workspace/data.csv"]
         )
@@ -795,9 +788,7 @@ async def test_argv_mode_xan_select_search_sort_and_filter() -> None:
     assert sorted_result.exit_code == 0
     assert sorted_result.stdout.startswith("name,age,city,vec_1,vec_2\nzoe,41,rome,5,6\n")
     assert filtered.exit_code == 0
-    assert filtered.stdout == (
-        "name,age,city,vec_1,vec_2\nbert,32,madrid,1,2\nzoe,41,rome,5,6\n"
-    )
+    assert filtered.stdout == ("name,age,city,vec_1,vec_2\nbert,32,madrid,1,2\nzoe,41,rome,5,6\n")
 
 
 @pytest.mark.anyio
@@ -807,7 +798,7 @@ async def test_script_mode_xan_preserves_column_globs() -> None:
             "/workspace/data.csv",
             "name,vec_1,vec_2\nbert,1,2\nana,3,4\n",
         )
-        result = await bash.exec_script('xan select vec_* /workspace/data.csv | tail -n 1')
+        result = await bash.exec_script("xan select vec_* /workspace/data.csv | tail -n 1")
 
     assert result.exit_code == 0
     assert result.stdout == "3,4\n"
@@ -1769,9 +1760,7 @@ async def test_curl_blocks_private_ranges_by_default() -> None:
             allowed_schemes=["http"],
         )
         async with Bash(network_policy=policy) as bash:
-            result = await bash.exec(
-                ["curl", f"{server.base_url}/hello"], network_enabled=True
-            )
+            result = await bash.exec(["curl", f"{server.base_url}/hello"], network_enabled=True)
 
     assert result.error is not None
     assert result.error.kind is ErrorKind.POLICY_DENIED
