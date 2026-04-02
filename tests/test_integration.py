@@ -943,6 +943,41 @@ async def test_argv_mode_xan_select_search_sort_and_filter() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_xan_head_tail_slice_reverse_and_column_ops() -> None:
+    async with Bash() as bash:
+        await bash.write_file(
+            "/workspace/data.csv",
+            "name,age,city,vec_1,vec_2\nbert,32,madrid,1,2\nana,28,porto,3,4\nzoe,41,rome,5,6\n",
+        )
+        head = await bash.exec(["xan", "head", "-n", "1", "/workspace/data.csv"])
+        tail = await bash.exec(["xan", "tail", "-n", "1", "/workspace/data.csv"])
+        sliced = await bash.exec(
+            ["xan", "slice", "-s", "1", "-l", "1", "/workspace/data.csv"]
+        )
+        reversed_rows = await bash.exec(["xan", "reverse", "/workspace/data.csv"])
+        dropped = await bash.exec(["xan", "drop", "vec_*", "/workspace/data.csv"])
+        renamed = await bash.exec(
+            ["xan", "rename", "person,years", "-s", "name,age", "/workspace/data.csv"]
+        )
+        enumerated = await bash.exec(["xan", "enum", "-c", "row_id", "/workspace/data.csv"])
+
+    assert head.exit_code == 0
+    assert head.stdout == "name,age,city,vec_1,vec_2\nbert,32,madrid,1,2\n"
+    assert tail.exit_code == 0
+    assert tail.stdout == "name,age,city,vec_1,vec_2\nzoe,41,rome,5,6\n"
+    assert sliced.exit_code == 0
+    assert sliced.stdout == "name,age,city,vec_1,vec_2\nana,28,porto,3,4\n"
+    assert reversed_rows.exit_code == 0
+    assert reversed_rows.stdout.startswith("name,age,city,vec_1,vec_2\nzoe,41,rome,5,6\n")
+    assert dropped.exit_code == 0
+    assert dropped.stdout == "name,age,city\nbert,32,madrid\nana,28,porto\nzoe,41,rome\n"
+    assert renamed.exit_code == 0
+    assert renamed.stdout.startswith("person,years,city,vec_1,vec_2\nbert,32,madrid,1,2\n")
+    assert enumerated.exit_code == 0
+    assert enumerated.stdout.startswith("row_id,name,age,city,vec_1,vec_2\n0,bert,32,madrid,1,2\n")
+
+
+@pytest.mark.anyio
 async def test_script_mode_xan_preserves_column_globs() -> None:
     async with Bash() as bash:
         await bash.write_file(

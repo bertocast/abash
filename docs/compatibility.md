@@ -74,7 +74,7 @@
 - `python` alias to `python3`: supported
 - narrow host-backed `python3` with `-c`, `-m`, script-file, `stdin`, and workspace file sync: supported
 - narrow host-backed `js-exec` with `-c`, script-file, `stdin`, and workspace file sync: supported
-- narrow `xan` CSV toolkit with `headers`, `count`, `select`, `search`, `sort`, and `filter`: supported
+- narrow `xan` CSV toolkit with `headers`, `count`, `head`, `tail`, `slice`, `reverse`, `select`, `drop`, `rename`, `enum`, `search`, `sort`, and `filter`: supported
 - `egrep` alias to current regex `grep`: supported
 - `fgrep` alias to current fixed-string `grep`: supported
 - narrow `find` with path roots plus `-name`, `-type`, and `-maxdepth`: supported

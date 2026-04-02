@@ -64,7 +64,7 @@ Highest-priority work:
 
 - `yq`: XML/INI/front-matter/in-place surface beyond the current YAML/JSON/TOML/CSV slice
 - `awk`: broader language surface
-- `xan`: additional CSV subcommands beyond the current narrow slice
+- `xan`: reshape/aggregation/data-conversion subcommands beyond the current core/column/row slice
 
 Recommended order:
 
@@ -74,7 +74,7 @@ Recommended order:
 
 Rationale:
 
-- `grep`, `ln`, execution reset-mode, a broader `jq` slice, and YAML/JSON/TOML/CSV `yq` transcoding are landed; `yq` still has the clearest remaining data-workflow payoff because XML/INI/front-matter are still absent
+- `grep`, `ln`, execution reset-mode, a broader `jq` slice, YAML/JSON/TOML/CSV `yq` transcoding, and the first broader `xan` subcommand wave are landed; `yq` still has the clearest remaining data-workflow payoff because XML/INI/front-matter are still absent
 - `jq` and `yq` affect high-value agent data workflows
 - `xan` and `awk` are larger interpreter-style expansions and should follow clearer wins
 

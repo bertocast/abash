@@ -1204,6 +1204,26 @@ impl VirtualSession {
             }
 
             match subcommand.as_str() {
+                "head" | "tail" if matches!(arg.as_str(), "-n" | "-l") => {
+                    expanded.push(arg.clone());
+                    literal_next = true;
+                    continue;
+                }
+                "slice"
+                    if matches!(
+                        arg.as_str(),
+                        "-s" | "--start" | "-e" | "--end" | "-l" | "--len"
+                    ) =>
+                {
+                    expanded.push(arg.clone());
+                    literal_next = true;
+                    continue;
+                }
+                "enum" if arg == "-c" => {
+                    expanded.push(arg.clone());
+                    literal_next = true;
+                    continue;
+                }
                 "search" if matches!(arg.as_str(), "-s" | "--select") => {
                     expanded.push(arg.clone());
                     literal_next = true;
@@ -1238,11 +1258,18 @@ impl VirtualSession {
                     expanded.push(arg.clone());
                     continue;
                 }
+                "rename" if matches!(arg.as_str(), "-s" | "--select") => {
+                    expanded.push(arg.clone());
+                    literal_next = true;
+                    continue;
+                }
                 _ => {}
             }
 
             let keep_literal = match subcommand.as_str() {
                 "select" => positional_consumed == 0,
+                "drop" => positional_consumed == 0,
+                "rename" => positional_consumed == 0,
                 "search" => positional_consumed == 0,
                 "filter" => positional_consumed == 0,
                 _ => false,

@@ -47,6 +47,38 @@ where
             let table = read_table(cwd, input.as_deref(), stdin, &mut read_file)?;
             Ok(text_result(format!("{}\n", table.rows.len())))
         }
+        XanCommand::Head { limit, input } => {
+            let table = read_table(cwd, input.as_deref(), stdin, &mut read_file)?;
+            let rows = table.rows.into_iter().take(limit).collect::<Vec<_>>();
+            Ok(text_result(format_csv(&table.headers, &rows)))
+        }
+        XanCommand::Tail { limit, input } => {
+            let table = read_table(cwd, input.as_deref(), stdin, &mut read_file)?;
+            let keep = table.rows.len().saturating_sub(limit);
+            let rows = table.rows.into_iter().skip(keep).collect::<Vec<_>>();
+            Ok(text_result(format_csv(&table.headers, &rows)))
+        }
+        XanCommand::Slice {
+            start,
+            end,
+            len,
+            input,
+        } => {
+            let table = read_table(cwd, input.as_deref(), stdin, &mut read_file)?;
+            let start_index = start.unwrap_or(0).min(table.rows.len());
+            let end_index = if let Some(length) = len {
+                start_index.saturating_add(length).min(table.rows.len())
+            } else {
+                end.unwrap_or(table.rows.len()).min(table.rows.len())
+            };
+            let rows = table.rows[start_index..end_index].to_vec();
+            Ok(text_result(format_csv(&table.headers, &rows)))
+        }
+        XanCommand::Reverse { input } => {
+            let mut table = read_table(cwd, input.as_deref(), stdin, &mut read_file)?;
+            table.rows.reverse();
+            Ok(text_result(format_csv(&table.headers, &table.rows)))
+        }
         XanCommand::Select { spec, input } => {
             let table = read_table(cwd, input.as_deref(), stdin, &mut read_file)?;
             let columns = resolve_column_spec(&spec, &table.headers)?;
@@ -58,6 +90,82 @@ where
                 .rows
                 .iter()
                 .map(|row| columns.iter().map(|index| row[*index].clone()).collect())
+                .collect::<Vec<Vec<String>>>();
+            Ok(text_result(format_csv(&headers, &rows)))
+        }
+        XanCommand::Drop { spec, input } => {
+            let table = read_table(cwd, input.as_deref(), stdin, &mut read_file)?;
+            let removed = resolve_column_spec(&spec, &table.headers)?
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            let kept = table
+                .headers
+                .iter()
+                .enumerate()
+                .filter_map(|(index, _)| (!removed.contains(&index)).then_some(index))
+                .collect::<Vec<_>>();
+            let headers = kept
+                .iter()
+                .map(|index| table.headers[*index].clone())
+                .collect::<Vec<_>>();
+            let rows = table
+                .rows
+                .iter()
+                .map(|row| kept.iter().map(|index| row[*index].clone()).collect())
+                .collect::<Vec<Vec<String>>>();
+            Ok(text_result(format_csv(&headers, &rows)))
+        }
+        XanCommand::Rename {
+            names,
+            select,
+            input,
+        } => {
+            let table = read_table(cwd, input.as_deref(), stdin, &mut read_file)?;
+            let replacements = names
+                .split(',')
+                .map(|value| value.trim().to_string())
+                .collect::<Vec<_>>();
+            if replacements.is_empty() || replacements.iter().all(String::is_empty) {
+                return Err(SandboxError::InvalidRequest(
+                    "xan rename requires at least one new column name".to_string(),
+                ));
+            }
+
+            let mut headers = table.headers.clone();
+            if let Some(spec) = select {
+                let columns = resolve_column_spec(&spec, &table.headers)?;
+                if columns.len() != replacements.len() {
+                    return Err(SandboxError::InvalidRequest(
+                        "xan rename selected columns and new names must have the same length"
+                            .to_string(),
+                    ));
+                }
+                for (index, replacement) in columns.into_iter().zip(replacements) {
+                    headers[index] = replacement;
+                }
+            } else {
+                for (index, replacement) in replacements.into_iter().enumerate() {
+                    if index >= headers.len() {
+                        break;
+                    }
+                    headers[index] = replacement;
+                }
+            }
+            Ok(text_result(format_csv(&headers, &table.rows)))
+        }
+        XanCommand::Enum { column, input } => {
+            let table = read_table(cwd, input.as_deref(), stdin, &mut read_file)?;
+            let mut headers = vec![column.clone()];
+            headers.extend(table.headers.clone());
+            let rows = table
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(index, row)| {
+                    let mut next = vec![index.to_string()];
+                    next.extend(row.clone());
+                    next
+                })
                 .collect::<Vec<Vec<String>>>();
             Ok(text_result(format_csv(&headers, &rows)))
         }
@@ -153,8 +261,38 @@ enum XanCommand {
     Count {
         input: Option<String>,
     },
+    Head {
+        limit: usize,
+        input: Option<String>,
+    },
+    Tail {
+        limit: usize,
+        input: Option<String>,
+    },
+    Slice {
+        start: Option<usize>,
+        end: Option<usize>,
+        len: Option<usize>,
+        input: Option<String>,
+    },
+    Reverse {
+        input: Option<String>,
+    },
     Select {
         spec: String,
+        input: Option<String>,
+    },
+    Drop {
+        spec: String,
+        input: Option<String>,
+    },
+    Rename {
+        names: String,
+        select: Option<String>,
+        input: Option<String>,
+    },
+    Enum {
+        column: String,
         input: Option<String>,
     },
     Search {
@@ -195,7 +333,14 @@ fn parse_command(args: &[String]) -> Result<XanCommand, SandboxError> {
     match subcommand {
         "headers" => parse_headers(&args[1..]),
         "count" => parse_count(&args[1..]),
+        "head" => parse_head(&args[1..]),
+        "tail" => parse_tail(&args[1..]),
+        "slice" => parse_slice(&args[1..]),
+        "reverse" => parse_reverse(&args[1..]),
         "select" => parse_select(&args[1..]),
+        "drop" => parse_drop(&args[1..]),
+        "rename" => parse_rename(&args[1..]),
+        "enum" => parse_enum(&args[1..]),
         "search" => parse_search(&args[1..]),
         "sort" => parse_sort(&args[1..]),
         "filter" => parse_filter(&args[1..]),
@@ -249,6 +394,140 @@ fn parse_count(args: &[String]) -> Result<XanCommand, SandboxError> {
     Ok(XanCommand::Count { input })
 }
 
+fn parse_head(args: &[String]) -> Result<XanCommand, SandboxError> {
+    parse_head_tail(args, true)
+}
+
+fn parse_tail(args: &[String]) -> Result<XanCommand, SandboxError> {
+    parse_head_tail(args, false)
+}
+
+fn parse_head_tail(args: &[String], head: bool) -> Result<XanCommand, SandboxError> {
+    let mut limit = 10usize;
+    let mut input = None;
+    let mut index = 0usize;
+
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-n" | "-l" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(SandboxError::InvalidRequest(
+                        "xan head/tail missing value for limit".to_string(),
+                    ));
+                };
+                limit = parse_usize_flag("xan head/tail limit", value)?;
+                index += 2;
+            }
+            "--help" | "-h" => return Ok(XanCommand::Help),
+            _ if arg.starts_with('-') => {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "xan {} flag is not supported: {arg}",
+                    if head { "head" } else { "tail" }
+                )))
+            }
+            _ if input.is_none() => {
+                input = Some(arg.clone());
+                index += 1;
+            }
+            _ => {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "xan {} accepts at most one input",
+                    if head { "head" } else { "tail" }
+                )))
+            }
+        }
+    }
+
+    Ok(if head {
+        XanCommand::Head { limit, input }
+    } else {
+        XanCommand::Tail { limit, input }
+    })
+}
+
+fn parse_slice(args: &[String]) -> Result<XanCommand, SandboxError> {
+    let mut start = None;
+    let mut end = None;
+    let mut len = None;
+    let mut input = None;
+    let mut index = 0usize;
+
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-s" | "--start" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(SandboxError::InvalidRequest(
+                        "xan slice missing value for -s".to_string(),
+                    ));
+                };
+                start = Some(parse_usize_flag("xan slice start", value)?);
+                index += 2;
+            }
+            "-e" | "--end" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(SandboxError::InvalidRequest(
+                        "xan slice missing value for -e".to_string(),
+                    ));
+                };
+                end = Some(parse_usize_flag("xan slice end", value)?);
+                index += 2;
+            }
+            "-l" | "--len" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(SandboxError::InvalidRequest(
+                        "xan slice missing value for -l".to_string(),
+                    ));
+                };
+                len = Some(parse_usize_flag("xan slice len", value)?);
+                index += 2;
+            }
+            "--help" | "-h" => return Ok(XanCommand::Help),
+            _ if arg.starts_with('-') => {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "xan slice flag is not supported: {arg}"
+                )))
+            }
+            _ if input.is_none() => {
+                input = Some(arg.clone());
+                index += 1;
+            }
+            _ => {
+                return Err(SandboxError::InvalidRequest(
+                    "xan slice accepts at most one input".to_string(),
+                ))
+            }
+        }
+    }
+
+    Ok(XanCommand::Slice {
+        start,
+        end,
+        len,
+        input,
+    })
+}
+
+fn parse_reverse(args: &[String]) -> Result<XanCommand, SandboxError> {
+    let mut input = None;
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(XanCommand::Help),
+            _ if arg.starts_with('-') => {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "xan reverse flag is not supported: {arg}"
+                )))
+            }
+            _ if input.is_none() => input = Some(arg.clone()),
+            _ => {
+                return Err(SandboxError::InvalidRequest(
+                    "xan reverse accepts at most one input".to_string(),
+                ))
+            }
+        }
+    }
+    Ok(XanCommand::Reverse { input })
+}
+
 fn parse_select(args: &[String]) -> Result<XanCommand, SandboxError> {
     let mut spec = None;
     let mut input = None;
@@ -273,6 +552,116 @@ fn parse_select(args: &[String]) -> Result<XanCommand, SandboxError> {
         SandboxError::InvalidRequest("xan select requires a column spec".to_string())
     })?;
     Ok(XanCommand::Select { spec, input })
+}
+
+fn parse_drop(args: &[String]) -> Result<XanCommand, SandboxError> {
+    let mut spec = None;
+    let mut input = None;
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(XanCommand::Help),
+            _ if arg.starts_with('-') => {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "xan drop flag is not supported: {arg}"
+                )))
+            }
+            _ if spec.is_none() => spec = Some(arg.clone()),
+            _ if input.is_none() => input = Some(arg.clone()),
+            _ => {
+                return Err(SandboxError::InvalidRequest(
+                    "xan drop accepts one column spec and one input".to_string(),
+                ))
+            }
+        }
+    }
+    let spec = spec.ok_or_else(|| {
+        SandboxError::InvalidRequest("xan drop requires a column spec".to_string())
+    })?;
+    Ok(XanCommand::Drop { spec, input })
+}
+
+fn parse_rename(args: &[String]) -> Result<XanCommand, SandboxError> {
+    let mut names = None;
+    let mut select = None;
+    let mut input = None;
+    let mut index = 0usize;
+
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-s" | "--select" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(SandboxError::InvalidRequest(
+                        "xan rename missing value for -s".to_string(),
+                    ));
+                };
+                select = Some(value.clone());
+                index += 2;
+            }
+            "--help" | "-h" => return Ok(XanCommand::Help),
+            _ if arg.starts_with('-') => {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "xan rename flag is not supported: {arg}"
+                )))
+            }
+            _ if names.is_none() => {
+                names = Some(arg.clone());
+                index += 1;
+            }
+            _ if input.is_none() => {
+                input = Some(arg.clone());
+                index += 1;
+            }
+            _ => {
+                return Err(SandboxError::InvalidRequest(
+                    "xan rename accepts one name list and one input".to_string(),
+                ))
+            }
+        }
+    }
+
+    let names = names
+        .ok_or_else(|| SandboxError::InvalidRequest("xan rename requires new names".to_string()))?;
+    Ok(XanCommand::Rename {
+        names,
+        select,
+        input,
+    })
+}
+
+fn parse_enum(args: &[String]) -> Result<XanCommand, SandboxError> {
+    let mut column = "index".to_string();
+    let mut input = None;
+    let mut index = 0usize;
+
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-c" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(SandboxError::InvalidRequest(
+                        "xan enum missing value for -c".to_string(),
+                    ));
+                };
+                column = value.clone();
+                index += 2;
+            }
+            "--help" | "-h" => return Ok(XanCommand::Help),
+            _ if arg.starts_with('-') => {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "xan enum flag is not supported: {arg}"
+                )))
+            }
+            _ if input.is_none() => {
+                input = Some(arg.clone());
+                index += 1;
+            }
+            _ => {
+                return Err(SandboxError::InvalidRequest(
+                    "xan enum accepts at most one input".to_string(),
+                ))
+            }
+        }
+    }
+    Ok(XanCommand::Enum { column, input })
 }
 
 fn parse_search(args: &[String]) -> Result<XanCommand, SandboxError> {
@@ -454,15 +843,28 @@ fn help_text() -> String {
         "Usage:",
         "  xan headers [-j] [FILE]",
         "  xan count [FILE]",
+        "  xan head [-n N] [FILE]",
+        "  xan tail [-n N] [FILE]",
+        "  xan slice [-s START] [-e END] [-l LEN] [FILE]",
+        "  xan reverse [FILE]",
         "  xan select COLS [FILE]",
+        "  xan drop COLS [FILE]",
+        "  xan rename NAMES [-s COLS] [FILE]",
+        "  xan enum [-c NAME] [FILE]",
         "  xan search [-s COLS] [-v] [-i] [-r] PATTERN [FILE]",
         "  xan sort [-s COL] [-N] [-R] [FILE]",
         "  xan filter [-v] [-l N] EXPR [FILE]",
         "",
         "Current scope:",
-        "  headers, count, select, search, sort, filter",
+        "  headers, count, head, tail, slice, reverse, select, drop, rename, enum, search, sort, filter",
     ]
     .join("\n")
+}
+
+fn parse_usize_flag(name: &str, value: &str) -> Result<usize, SandboxError> {
+    value
+        .parse::<usize>()
+        .map_err(|_| SandboxError::InvalidRequest(format!("{name} must be a number")))
 }
 
 fn read_table<F>(
