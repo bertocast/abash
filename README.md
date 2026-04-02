@@ -55,10 +55,6 @@ Most commands are intentionally partial implementations. `abash` aims for safe, 
 
 Pending commands from [docs/pending_commands.md](docs/pending_commands.md):
 
-### Tier 5
-
-- `fgrep`
-
 ## Filesystem Modes
 
 | Mode | Read Visibility | Write Behavior | Persistence | Host Mutation |

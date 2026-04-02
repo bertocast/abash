@@ -585,6 +585,7 @@ impl VirtualSession {
             "cat" => self.run_cat(cwd, args, stdin, metadata),
             "grep" => self.run_grep(cwd, args, stdin, metadata),
             "egrep" => self.run_grep_alias(cwd, args, stdin, metadata, "-E"),
+            "fgrep" => self.run_grep_alias(cwd, args, stdin, metadata, "-F"),
             "wc" => self.run_wc(cwd, args, stdin, metadata),
             "sort" => self.run_sort(cwd, args, stdin, metadata),
             "uniq" => self.run_uniq(cwd, args, stdin, metadata),
@@ -1606,6 +1607,7 @@ impl VirtualSession {
                 "-n" => numbered = true,
                 "-v" => inverted = true,
                 "-E" => {}
+                "-F" => {}
                 _ if flag.starts_with('-') => {
                     return Err(SandboxError::InvalidRequest(format!(
                         "grep flag is not supported: {flag}"

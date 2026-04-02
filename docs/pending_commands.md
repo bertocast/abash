@@ -24,7 +24,7 @@
 ## Tier 5
 
 - [x] `egrep`
-- [ ] `fgrep`
+- [x] `fgrep`
 
 ## Notes
 
