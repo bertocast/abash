@@ -715,6 +715,41 @@ async def test_argv_mode_python_alias_forwards_to_python3() -> None:
 
     assert result.exit_code == 0
     assert result.stdout == "alias ok\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_js_exec_executes_inline_code_and_reads_workspace_files() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/demo.txt", "hello js-exec")
+        result = await bash.exec(
+            [
+                "js-exec",
+                "-c",
+                "const fs = require('fs'); console.log(fs.readFileSync('/workspace/demo.txt', 'utf8').trim())",
+            ]
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "hello js-exec\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_js_exec_syncs_workspace_mutations_back() -> None:
+    async with Bash() as bash:
+        result = await bash.exec(
+            [
+                "js-exec",
+                "-c",
+                "const fs = require('fs'); fs.writeFileSync('/workspace/out.txt', 'from js-exec'); console.log(fs.readFileSync('/workspace/out.txt', 'utf8'))",
+            ]
+        )
+        restored = await bash.read_file("/workspace/out.txt")
+
+    assert result.exit_code == 0
+    assert result.stdout == "from js-exec\n"
+    assert restored == "from js-exec"
+
+
 @pytest.mark.anyio
 async def test_argv_mode_find_supports_name_type_and_depth() -> None:
     async with Bash() as bash:

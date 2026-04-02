@@ -115,6 +115,15 @@ pub(crate) fn bootstrap_dir(root: &Path, sandbox_cwd: &str) -> Result<PathBuf, S
     Ok(dir)
 }
 
+pub(crate) fn node_preload_file(root: &Path, sandbox_cwd: &str) -> Result<PathBuf, SandboxError> {
+    let dir = root.join("_abash_bootstrap");
+    fs::create_dir_all(&dir).map_err(io_error("failed to create node bootstrap directory"))?;
+    let file = dir.join("preload.js");
+    fs::write(&file, node_preload(sandbox_cwd))
+        .map_err(io_error("failed to write node bootstrap"))?;
+    Ok(file)
+}
+
 fn create_temp_root() -> Result<PathBuf, SandboxError> {
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -264,6 +273,58 @@ _Path.iterdir = lambda self: _Path_iterdir(_abash_host_path(self))
 _Path.mkdir = lambda self, mode=0o777, parents=False, exist_ok=False: _Path_mkdir(_abash_host_path(self), mode=mode, parents=parents, exist_ok=exist_ok)
 _Path.unlink = lambda self, missing_ok=False: _Path_unlink(_abash_host_path(self), missing_ok=missing_ok)
 _Path.rmdir = lambda self: _Path_rmdir(_abash_host_path(self))
+"#
+    )
+}
+
+fn node_preload(sandbox_cwd: &str) -> String {
+    format!(
+        r#"
+const fs = require("fs");
+const path = require("path");
+
+const root = process.env.ABASH_SANDBOX_ROOT || "";
+let sandboxCwd = {sandbox_cwd:?};
+const originalCwd = process.cwd.bind(process);
+const originalChdir = process.chdir.bind(process);
+
+function mapPath(value) {{
+  if (typeof value !== "string") return value;
+  if (path.isAbsolute(value)) {{
+    return path.join(root, value.replace(/^\/+/, ""));
+  }}
+  return value;
+}}
+
+function refreshSandboxCwd() {{
+  const cwd = originalCwd();
+  if (cwd.startsWith(root)) {{
+    const relative = cwd.slice(root.length).replace(/\\/g, "/");
+    sandboxCwd = relative || "/";
+  }} else {{
+    sandboxCwd = cwd;
+  }}
+}}
+
+process.cwd = () => sandboxCwd;
+process.chdir = (target) => {{
+  originalChdir(mapPath(target));
+  if (typeof target === "string" && path.isAbsolute(target)) {{
+    sandboxCwd = target;
+  }} else {{
+    refreshSandboxCwd();
+  }}
+}};
+
+for (const name of ["readFileSync", "writeFileSync", "appendFileSync", "existsSync", "statSync", "readdirSync", "mkdirSync", "rmSync", "unlinkSync", "rmdirSync"]) {{
+  const original = fs[name].bind(fs);
+  fs[name] = (...args) => {{
+    if (args.length > 0) {{
+      args[0] = mapPath(args[0]);
+    }}
+    return original(...args);
+  }};
+}}
 "#
     )
 }

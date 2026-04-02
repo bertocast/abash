@@ -20,6 +20,7 @@ mod gzipcmd;
 mod hashcmd;
 mod hostexec;
 mod jq;
+mod jsexeccmd;
 mod ls;
 mod mv;
 mod odcmd;
@@ -632,6 +633,9 @@ impl VirtualSession {
             "python" => self.run_python3(cwd, args, stdin, &env, timeout_ms, cancel_flag, metadata),
             "python3" => {
                 self.run_python3(cwd, args, stdin, &env, timeout_ms, cancel_flag, metadata)
+            }
+            "js-exec" => {
+                self.run_js_exec(cwd, args, stdin, &env, timeout_ms, cancel_flag, metadata)
             }
             "xargs" => self.run_xargs(
                 runtime,
@@ -2127,6 +2131,28 @@ impl VirtualSession {
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
         python3cmd::execute(
+            &mut *self.filesystem,
+            cwd,
+            env,
+            &stdin,
+            &args,
+            timeout_ms,
+            cancel_flag,
+            metadata,
+        )
+    }
+
+    fn run_js_exec(
+        &mut self,
+        cwd: &str,
+        args: Vec<String>,
+        stdin: Vec<u8>,
+        env: &BTreeMap<String, String>,
+        timeout_ms: Option<u64>,
+        cancel_flag: &AtomicBool,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        jsexeccmd::execute(
             &mut *self.filesystem,
             cwd,
             env,
@@ -3980,6 +4006,7 @@ mod tests {
                 "chmod",
                 "python",
                 "python3",
+                "js-exec",
                 "xargs",
                 "rg",
                 "split",

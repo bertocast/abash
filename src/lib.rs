@@ -339,6 +339,7 @@ fn default_allowlisted_commands() -> Vec<String> {
         "chmod".to_string(),
         "python".to_string(),
         "python3".to_string(),
+        "js-exec".to_string(),
         "xargs".to_string(),
         "rg".to_string(),
         "split".to_string(),

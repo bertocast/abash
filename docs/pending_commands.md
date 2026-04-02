@@ -18,10 +18,10 @@
 - [x] Tier 4: `chmod`
 - [x] Tier 4: `python3`
 - [x] Tier 4: `python`
+- [x] Tier 4: `js-exec`
 
 ## Tier 4
 
-- [ ] `js-exec`
 - [ ] `xan`
 
 ## Tier 5
