@@ -28,7 +28,8 @@
 - pipes (`|`): supported, buffered and sequential
 - redirects (`<`, `>`, `>>`, `2>`, `2>>`, `2>&1`): supported
 - command chaining (`;`, `&&`, `||`): supported
-- minimal control flow (`if ...; then ...; fi`, `elif`, optional `else`, `while ...; do ...; done`): supported
+- minimal control flow (`if ...; then ...; fi`, `elif`, optional `else`, `while ...; do ...; done`, `until ...; do ...; done`, `for ...; do ...; done`): supported
+- narrow `name() { ...; }` functions plus `local`: supported
 - command-local assignment prefixes (`FOO=bar cmd`): supported
 - `$NAME`, `${NAME}`, `${NAME:-default}`, `$1`, `$2`, `$@`, and `$#` expansion: supported in script mode
 - argument globbing with `*`, `?`, and bracket classes: supported in script mode
@@ -101,8 +102,8 @@
 - unmatched glob patterns: preserved literally
 - persistent shell variables: not implemented
 - command-name globbing: not implemented
-- broader control flow (`while`, `for`, `case`): not implemented
-- functions: not implemented
+- `case`: not implemented
+- `return` / `break` / `continue`: not implemented
 - subshells / command substitution: not implemented
 - broader fd juggling beyond `2>`, `2>>`, `2>&1`: not implemented
 

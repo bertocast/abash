@@ -42,6 +42,9 @@ pub(crate) enum StepKind {
     Pipeline(Pipeline),
     If(IfBlock),
     While(WhileBlock),
+    Until(WhileBlock),
+    For(ForBlock),
+    FunctionDef(FunctionDef),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +57,19 @@ pub(crate) struct IfBlock {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WhileBlock {
     pub condition: Pipeline,
+    pub body_steps: Vec<ScriptStep>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ForBlock {
+    pub name: String,
+    pub items: Vec<ScriptWord>,
+    pub body_steps: Vec<ScriptStep>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FunctionDef {
+    pub name: String,
     pub body_steps: Vec<ScriptStep>,
 }
 
@@ -76,6 +92,8 @@ pub(crate) enum Token {
     AndIf,
     OrIf,
     Semicolon,
+    LBrace,
+    RBrace,
     RedirectIn,
     RedirectOut,
     RedirectAppend,
@@ -277,6 +295,14 @@ fn tokenize(source: &str) -> Result<Vec<Token>, SandboxError> {
                 builder.flush(&mut tokens);
                 tokens.push(Token::Semicolon);
             }
+            '{' if builder.is_empty() => {
+                builder.flush(&mut tokens);
+                tokens.push(Token::LBrace);
+            }
+            '}' if builder.is_empty() => {
+                builder.flush(&mut tokens);
+                tokens.push(Token::RBrace);
+            }
             '<' => {
                 builder.flush(&mut tokens);
                 tokens.push(Token::RedirectIn);
@@ -409,11 +435,20 @@ impl Parser {
     }
 
     fn parse_step_kind(&mut self) -> Result<StepKind, SandboxError> {
+        if self.peek_function_definition() {
+            return Ok(StepKind::FunctionDef(self.parse_function_def()?));
+        }
         if self.consume_keyword("if") {
             return Ok(StepKind::If(self.parse_if_block()?));
         }
         if self.consume_keyword("while") {
             return Ok(StepKind::While(self.parse_while_block()?));
+        }
+        if self.consume_keyword("until") {
+            return Ok(StepKind::Until(self.parse_while_block()?));
+        }
+        if self.consume_keyword("for") {
+            return Ok(StepKind::For(self.parse_for_block()?));
         }
         Ok(StepKind::Pipeline(self.parse_pipeline()?))
     }
@@ -473,6 +508,83 @@ impl Parser {
 
         Ok(WhileBlock {
             condition,
+            body_steps,
+        })
+    }
+
+    fn parse_for_block(&mut self) -> Result<ForBlock, SandboxError> {
+        let Some(Token::Word(name_word)) = self.next() else {
+            return Err(SandboxError::InvalidRequest(
+                "for loops require a loop variable name".to_string(),
+            ));
+        };
+        let name = name_word.literal_value();
+        if !is_valid_assignment_name(&name) {
+            return Err(SandboxError::InvalidRequest(format!(
+                "invalid for-loop variable name: {name}"
+            )));
+        }
+
+        let mut items = Vec::new();
+        if self.consume_keyword("in") {
+            loop {
+                match self.peek() {
+                    Some(Token::Semicolon) => break,
+                    Some(Token::Word(_)) => items.push(self.expect_word("for loop item")?),
+                    Some(_) => {
+                        return Err(SandboxError::InvalidRequest(
+                            "invalid token in for loop item list".to_string(),
+                        ));
+                    }
+                    None => {
+                        return Err(SandboxError::InvalidRequest(
+                            "unterminated for loop".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        self.expect_clause_separator("do")?;
+        self.expect_keyword("do")?;
+        let body_steps = self.parse_steps_until(&["done"])?;
+        if body_steps.is_empty() {
+            return Err(SandboxError::InvalidRequest(
+                "for loops require at least one command in the body".to_string(),
+            ));
+        }
+        self.expect_keyword("done")?;
+
+        Ok(ForBlock {
+            name,
+            items,
+            body_steps,
+        })
+    }
+
+    fn parse_function_def(&mut self) -> Result<FunctionDef, SandboxError> {
+        let Some(Token::Word(name_word)) = self.next() else {
+            unreachable!();
+        };
+        let raw_name = name_word.literal_value();
+        let name = raw_name.strip_suffix("()").ok_or_else(|| {
+            SandboxError::InvalidRequest("invalid function declaration".to_string())
+        })?;
+        if !is_valid_assignment_name(name) {
+            return Err(SandboxError::InvalidRequest(format!(
+                "invalid function name: {name}"
+            )));
+        }
+        self.expect_lbrace()?;
+        let body_steps = self.parse_steps_until_brace()?;
+        if body_steps.is_empty() {
+            return Err(SandboxError::InvalidRequest(
+                "function bodies require at least one command".to_string(),
+            ));
+        }
+        self.expect_rbrace()?;
+        Ok(FunctionDef {
+            name: name.to_string(),
             body_steps,
         })
     }
@@ -573,6 +685,66 @@ impl Parser {
         Ok(())
     }
 
+    fn parse_steps_until_brace(&mut self) -> Result<Vec<ScriptStep>, SandboxError> {
+        let mut steps = Vec::new();
+
+        while self.skip_semicolons() {
+            if matches!(self.peek(), Some(Token::RBrace)) {
+                break;
+            }
+            let op = if steps.is_empty() {
+                None
+            } else {
+                Some(ChainOp::Seq)
+            };
+            steps.push(ScriptStep {
+                op,
+                kind: self.parse_step_kind()?,
+            });
+
+            loop {
+                if matches!(self.peek(), Some(Token::RBrace)) {
+                    return Ok(steps);
+                }
+                match self.peek() {
+                    Some(Token::Semicolon) => {
+                        self.index += 1;
+                        while matches!(self.peek(), Some(Token::Semicolon)) {
+                            self.index += 1;
+                        }
+                        if matches!(self.peek(), Some(Token::RBrace)) {
+                            return Ok(steps);
+                        }
+                        break;
+                    }
+                    Some(Token::AndIf) => {
+                        self.index += 1;
+                        steps.push(ScriptStep {
+                            op: Some(ChainOp::AndIf),
+                            kind: self.parse_step_kind()?,
+                        });
+                    }
+                    Some(Token::OrIf) => {
+                        self.index += 1;
+                        steps.push(ScriptStep {
+                            op: Some(ChainOp::OrIf),
+                            kind: self.parse_step_kind()?,
+                        });
+                    }
+                    Some(Token::Pipe) => {
+                        return Err(SandboxError::InvalidRequest(
+                            "unexpected pipe in function body".to_string(),
+                        ));
+                    }
+                    Some(Token::RBrace) | None => return Ok(steps),
+                    _ => break,
+                }
+            }
+        }
+
+        Ok(steps)
+    }
+
     fn peek_keyword(&self, keywords: &[&str]) -> bool {
         let Some(Token::Word(word)) = self.peek() else {
             return false;
@@ -597,6 +769,31 @@ impl Parser {
         )))
     }
 
+    fn expect_lbrace(&mut self) -> Result<(), SandboxError> {
+        if matches!(self.next(), Some(Token::LBrace)) {
+            return Ok(());
+        }
+        Err(SandboxError::InvalidRequest(
+            "expected { in function definition".to_string(),
+        ))
+    }
+
+    fn expect_rbrace(&mut self) -> Result<(), SandboxError> {
+        if matches!(self.next(), Some(Token::RBrace)) {
+            return Ok(());
+        }
+        Err(SandboxError::InvalidRequest(
+            "expected } at the end of a function body".to_string(),
+        ))
+    }
+
+    fn peek_function_definition(&self) -> bool {
+        matches!(
+            (self.peek(), self.tokens.get(self.index + 1)),
+            (Some(Token::Word(word)), Some(Token::LBrace)) if word.literal_value().ends_with("()")
+        )
+    }
+
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.index)
     }
@@ -610,7 +807,7 @@ impl Parser {
     }
 }
 
-fn is_valid_assignment_name(value: &str) -> bool {
+pub(crate) fn is_valid_assignment_name(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -660,15 +857,33 @@ fn expand_part(
                 Some((name, default)) => (name, Some(default)),
                 None => (expression.as_str(), None),
             };
+            if let Ok(position) = name.parse::<usize>() {
+                if position > 0 {
+                    match positional_args
+                        .get(position - 1)
+                        .filter(|value| !value.is_empty())
+                    {
+                        Some(value) => output.push_str(value),
+                        None => {
+                            if let Some(default) = default_value {
+                                output.push_str(&expand_part(default, env, positional_args)?);
+                            }
+                        }
+                    }
+                }
+                index += 1;
+                continue;
+            }
+
             if !is_valid_assignment_name(name) {
                 return Err(SandboxError::InvalidRequest(format!(
                     "invalid variable name in expansion: {name}"
                 )));
             }
 
-            match env.get(name) {
-                Some(value) if !value.is_empty() => output.push_str(value),
-                _ => {
+            match env.get(name).filter(|value| !value.is_empty()) {
+                Some(value) => output.push_str(value),
+                None => {
                     if let Some(default) = default_value {
                         output.push_str(&expand_part(default, env, positional_args)?);
                     }
@@ -840,6 +1055,15 @@ mod tests {
             expand_part("${MISSING:-$FALLBACK}", &env, &[]).unwrap(),
             "fallback".to_string()
         );
+        let positional = vec!["first".to_string()];
+        assert_eq!(
+            expand_part("${1:-default}", &env, &positional).unwrap(),
+            "first".to_string()
+        );
+        assert_eq!(
+            expand_part("${2:-default}", &env, &positional).unwrap(),
+            "default".to_string()
+        );
     }
 
     #[test]
@@ -910,6 +1134,28 @@ mod tests {
         assert_eq!(block.condition.commands.len(), 1);
         assert_eq!(block.body_steps.len(), 1);
     }
+
+    #[test]
+    fn parses_until_for_and_function_blocks() {
+        let parsed = parse_script(
+            "until true; do echo wait; done; for item in a b; do echo $item; done; greet() { echo hi; }",
+        )
+        .unwrap();
+        let StepKind::Until(until_block) = &parsed[0].kind else {
+            panic!("expected until block");
+        };
+        assert_eq!(until_block.body_steps.len(), 1);
+        let StepKind::For(for_block) = &parsed[1].kind else {
+            panic!("expected for block");
+        };
+        assert_eq!(for_block.name, "item");
+        assert_eq!(for_block.items.len(), 2);
+        let StepKind::FunctionDef(function) = &parsed[2].kind else {
+            panic!("expected function definition");
+        };
+        assert_eq!(function.name, "greet");
+        assert_eq!(function.body_steps.len(), 1);
+    }
 }
 
 impl StepKind {
@@ -919,6 +1165,9 @@ impl StepKind {
             Self::Pipeline(pipeline) => pipeline,
             Self::If(_) => panic!("expected pipeline"),
             Self::While(_) => panic!("expected pipeline"),
+            Self::Until(_) => panic!("expected pipeline"),
+            Self::For(_) => panic!("expected pipeline"),
+            Self::FunctionDef(_) => panic!("expected pipeline"),
         }
     }
 }

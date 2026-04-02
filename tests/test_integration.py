@@ -237,6 +237,43 @@ async def test_script_mode_supports_while_do_done() -> None:
 
 
 @pytest.mark.anyio
+async def test_script_mode_supports_until_do_done() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/loop", parents=True)
+        result = await bash.exec_script(
+            "until find /workspace/loop -name done.txt | grep done.txt; do echo tick; touch /workspace/loop/done.txt; done"
+        )
+        remaining = await bash.exists("/workspace/loop/done.txt")
+
+    assert result.exit_code == 0
+    assert result.stdout == "tick\n/workspace/loop/done.txt\n"
+    assert remaining is True
+
+
+@pytest.mark.anyio
+async def test_script_mode_supports_for_loops_over_positional_args() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script(
+            "for item; do echo $item; done",
+            argv=["bert", "ana"],
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "bert\nana\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_supports_functions_and_local_variables() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script(
+            "greet() { local name=${1:-bert}; echo $name; }; greet ana; echo ${name:-missing}"
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "ana\nmissing\n"
+
+
+@pytest.mark.anyio
 async def test_argv_mode_text_builtins_support_stdin_and_exit_codes() -> None:
     async with Bash() as bash:
         grep_hit = await bash.exec(["grep", "beta"], stdin="alpha\nbeta\n")

@@ -15,24 +15,16 @@ Recommended focus:
 
 ## Shell Language
 
-`abash` currently covers simple commands, chaining, pipes, redirections, basic variable expansion, globbing, and minimal `if`.
+`abash` now covers simple commands, chaining, pipes, redirections, basic variable expansion, globbing, `if` / `elif`, `while`, `until`, `for`, and narrow `name() { ... }` functions with `local`.
 
-`just-bash` advertises a broader shell language:
+Status:
 
-- functions
-- `local`
-- loops: `for`, `until`
+- `for`: landed
+- functions and `local`: landed in a narrow script-only form
+- `until`: landed
+- broader shell constructs such as `case`, `return`, `break`, and `continue` remain intentionally out of scope for now and are tracked as compatibility notes instead of active roadmap items
 
-Recommended order:
-
-1. `for`
-2. functions and `local`
-3. `until`
-
-Rationale:
-
-- `for` is the next smallest control-flow step after `while`
-- functions and `local` should come after loop/control-flow semantics are stable
+Next focus: no active shell-language roadmap items.
 
 ## Execution Semantics
 

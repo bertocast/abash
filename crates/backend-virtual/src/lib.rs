@@ -55,8 +55,8 @@ use abash_core::{
     TerminationReason,
 };
 use script::{
-    parse_script, ChainOp, IfBlock, Pipeline, RedirectSpec, ScriptStep, ScriptWord, SimpleCommand,
-    StepKind, WhileBlock,
+    is_valid_assignment_name, parse_script, ChainOp, ForBlock, FunctionDef, IfBlock, Pipeline,
+    RedirectSpec, ScriptStep, ScriptWord, SimpleCommand, StepKind, WhileBlock,
 };
 use ureq::{http, Agent, RequestExt};
 use url::Url;
@@ -342,6 +342,33 @@ impl VirtualSession {
                     script_stdin,
                     state,
                 )?,
+                StepKind::Until(block) => self.run_until_block(
+                    runtime,
+                    block,
+                    config,
+                    cancel_flag,
+                    timeout_ms,
+                    started,
+                    network_enabled,
+                    base_metadata,
+                    script_stdin,
+                    state,
+                )?,
+                StepKind::For(block) => self.run_for_block(
+                    runtime,
+                    block,
+                    config,
+                    cancel_flag,
+                    timeout_ms,
+                    started,
+                    network_enabled,
+                    base_metadata,
+                    script_stdin,
+                    state,
+                )?,
+                StepKind::FunctionDef(definition) => {
+                    self.register_function(runtime, definition, base_metadata, state)
+                }
             }
         }
 
@@ -505,6 +532,154 @@ impl VirtualSession {
         }
     }
 
+    fn run_until_block(
+        &mut self,
+        runtime: &mut RuntimeState,
+        block: &WhileBlock,
+        config: &SandboxConfig,
+        cancel_flag: &AtomicBool,
+        timeout_ms: Option<u64>,
+        started: Instant,
+        network_enabled: bool,
+        base_metadata: &BTreeMap<String, String>,
+        script_stdin: &mut Option<Vec<u8>>,
+        state: &mut ScriptState,
+    ) -> Result<(), ExecutionResult> {
+        let mut ran_body = false;
+
+        loop {
+            let condition = self
+                .run_pipeline(
+                    runtime,
+                    &block.condition,
+                    config,
+                    cancel_flag,
+                    timeout_ms,
+                    started,
+                    network_enabled,
+                    base_metadata,
+                    script_stdin,
+                )
+                .map_err(|error| {
+                    let mut failed =
+                        ExecutionResult::failure(error, self.base_metadata(&runtime.cwd));
+                    failed.stdout = state.stdout.clone();
+                    failed.stderr = state.stderr.clone();
+                    failed
+                })?;
+            state.executed_steps += 1;
+            state.stdout.extend(&condition.stdout);
+            state.stderr.extend(&condition.stderr);
+
+            if condition.error.is_some() {
+                let mut failed = condition;
+                failed.stdout = state.stdout.clone();
+                failed.stderr = state.stderr.clone();
+                return Err(failed);
+            }
+
+            if condition.exit_code == 0 {
+                if !ran_body {
+                    state.last_result = Some(self.if_no_match_result(&runtime.cwd, base_metadata));
+                }
+                return Ok(());
+            }
+
+            ran_body = true;
+            let mut body_state = ScriptState::default();
+            if let Err(mut failed) = self.run_steps(
+                runtime,
+                &block.body_steps,
+                config,
+                cancel_flag,
+                timeout_ms,
+                started,
+                network_enabled,
+                base_metadata,
+                script_stdin,
+                &mut body_state,
+            ) {
+                state.merge(body_state);
+                failed.stdout = state.stdout.clone();
+                failed.stderr = state.stderr.clone();
+                return Err(failed);
+            }
+
+            state.merge(body_state);
+        }
+    }
+
+    fn run_for_block(
+        &mut self,
+        runtime: &mut RuntimeState,
+        block: &ForBlock,
+        config: &SandboxConfig,
+        cancel_flag: &AtomicBool,
+        timeout_ms: Option<u64>,
+        started: Instant,
+        network_enabled: bool,
+        base_metadata: &BTreeMap<String, String>,
+        script_stdin: &mut Option<Vec<u8>>,
+        state: &mut ScriptState,
+    ) -> Result<(), ExecutionResult> {
+        let items = if block.items.is_empty() {
+            runtime.positional_args.clone()
+        } else {
+            expand_words(&block.items, &runtime.env, &runtime.positional_args).map_err(|error| {
+                let mut failed = ExecutionResult::failure(error, self.base_metadata(&runtime.cwd));
+                failed.stdout = state.stdout.clone();
+                failed.stderr = state.stderr.clone();
+                failed
+            })?
+        };
+
+        if items.is_empty() {
+            state.last_result = Some(self.if_no_match_result(&runtime.cwd, base_metadata));
+            return Ok(());
+        }
+
+        for item in items {
+            runtime.env.insert(block.name.clone(), item);
+            let mut body_state = ScriptState::default();
+            if let Err(mut failed) = self.run_steps(
+                runtime,
+                &block.body_steps,
+                config,
+                cancel_flag,
+                timeout_ms,
+                started,
+                network_enabled,
+                base_metadata,
+                script_stdin,
+                &mut body_state,
+            ) {
+                state.merge(body_state);
+                failed.stdout = state.stdout.clone();
+                failed.stderr = state.stderr.clone();
+                return Err(failed);
+            }
+            state.merge(body_state);
+        }
+
+        Ok(())
+    }
+
+    fn register_function(
+        &mut self,
+        runtime: &mut RuntimeState,
+        definition: &FunctionDef,
+        base_metadata: &BTreeMap<String, String>,
+        state: &mut ScriptState,
+    ) {
+        runtime
+            .functions
+            .insert(definition.name.clone(), definition.body_steps.clone());
+        state.last_result = Some(ExecutionResult::success(
+            Vec::new(),
+            self.command_metadata(&runtime.cwd, base_metadata.clone(), &definition.name),
+        ));
+    }
+
     fn run_pipeline(
         &mut self,
         runtime: &mut RuntimeState,
@@ -615,6 +790,21 @@ impl VirtualSession {
         env: BTreeMap<String, String>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
+        if runtime.functions.contains_key(&command) {
+            return self.run_function_call(
+                runtime,
+                &command,
+                args,
+                config,
+                cancel_flag,
+                timeout_ms,
+                network_enabled,
+                metadata,
+            );
+        }
+        if command == "local" {
+            return self.run_local(runtime, args, metadata);
+        }
         if !config.allowlisted_commands.contains(&command) {
             return Err(SandboxError::PolicyDenied(format!(
                 "command is not allowlisted: {command}"
@@ -890,6 +1080,116 @@ impl VirtualSession {
             Vec::new(),
             decorate_script_metadata(self.base_metadata(&child.cwd), &child.cwd, 0, None),
         ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_function_call(
+        &mut self,
+        runtime: &mut RuntimeState,
+        name: &str,
+        args: Vec<String>,
+        config: &SandboxConfig,
+        cancel_flag: &AtomicBool,
+        timeout_ms: Option<u64>,
+        network_enabled: bool,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        let body_steps = runtime.functions.get(name).cloned().ok_or_else(|| {
+            SandboxError::BackendFailure(format!("function is not defined: {name}"))
+        })?;
+        let started = Instant::now();
+        let mut child = runtime.child();
+        child.positional_args = args;
+        child.function_depth += 1;
+        let mut script_stdin = Some(Vec::new());
+        let mut state = ScriptState::default();
+
+        if let Err(mut failed) = self.run_steps(
+            &mut child,
+            &body_steps,
+            config,
+            cancel_flag,
+            timeout_ms,
+            started,
+            network_enabled,
+            &metadata,
+            &mut script_stdin,
+            &mut state,
+        ) {
+            runtime.cwd = child.cwd;
+            runtime.persisted_cwd = child.persisted_cwd;
+            runtime.exported_env = child.exported_env;
+            runtime.aliases = child.aliases;
+            runtime.functions = child.functions;
+            let last_command = failed.metadata.get("command").cloned();
+            failed.metadata = decorate_script_metadata(
+                failed.metadata,
+                &runtime.cwd,
+                state.executed_steps,
+                last_command,
+            );
+            return Ok(failed);
+        }
+
+        runtime.cwd = child.cwd;
+        runtime.persisted_cwd = child.persisted_cwd;
+        runtime.exported_env = child.exported_env;
+        runtime.aliases = child.aliases;
+        runtime.functions = child.functions;
+
+        if let Some(mut result) = state.last_result {
+            let last_command = result.metadata.get("command").cloned();
+            result.stdout = state.stdout;
+            result.stderr = state.stderr;
+            result.metadata = decorate_script_metadata(
+                result.metadata,
+                &runtime.cwd,
+                state.executed_steps,
+                last_command,
+            );
+            return Ok(result);
+        }
+
+        Ok(ExecutionResult::success(
+            Vec::new(),
+            decorate_script_metadata(self.base_metadata(&runtime.cwd), &runtime.cwd, 0, None),
+        ))
+    }
+
+    fn run_local(
+        &mut self,
+        runtime: &mut RuntimeState,
+        args: Vec<String>,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        if runtime.function_depth == 0 {
+            return Err(SandboxError::InvalidRequest(
+                "local may only be used inside a function".to_string(),
+            ));
+        }
+        if args.is_empty() {
+            return Err(SandboxError::InvalidRequest(
+                "local requires at least one variable name".to_string(),
+            ));
+        }
+        for arg in args {
+            if let Some((name, value)) = arg.split_once('=') {
+                if !is_valid_assignment_name(name) {
+                    return Err(SandboxError::InvalidRequest(format!(
+                        "invalid local variable name: {name}"
+                    )));
+                }
+                runtime.env.insert(name.to_string(), value.to_string());
+                continue;
+            }
+            if !is_valid_assignment_name(&arg) {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "invalid local variable name: {arg}"
+                )));
+            }
+            runtime.env.entry(arg).or_default();
+        }
+        Ok(ExecutionResult::success(Vec::new(), metadata))
     }
 
     fn apply_redirects(
@@ -3463,6 +3763,8 @@ struct RuntimeState {
     exported_env: BTreeMap<String, String>,
     aliases: BTreeMap<String, Vec<String>>,
     positional_args: Vec<String>,
+    functions: BTreeMap<String, Vec<ScriptStep>>,
+    function_depth: usize,
 }
 
 impl RuntimeState {
@@ -3483,6 +3785,8 @@ impl RuntimeState {
             exported_env,
             aliases,
             positional_args,
+            functions: BTreeMap::new(),
+            function_depth: 0,
         }
     }
 
