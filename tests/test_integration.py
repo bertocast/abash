@@ -706,6 +706,15 @@ async def test_argv_mode_python3_syncs_workspace_mutations_back() -> None:
     assert result.exit_code == 0
     assert result.stdout == "from python3\n"
     assert restored == "from python3"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_python_alias_forwards_to_python3() -> None:
+    async with Bash() as bash:
+        result = await bash.exec(["python", "-c", "print('alias ok')"])
+
+    assert result.exit_code == 0
+    assert result.stdout == "alias ok\n"
 @pytest.mark.anyio
 async def test_argv_mode_find_supports_name_type_and_depth() -> None:
     async with Bash() as bash:

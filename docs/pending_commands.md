@@ -17,10 +17,10 @@
 - [x] Tier 4: `tar`
 - [x] Tier 4: `chmod`
 - [x] Tier 4: `python3`
+- [x] Tier 4: `python`
 
 ## Tier 4
 
-- [ ] `python`
 - [ ] `js-exec`
 - [ ] `xan`
 

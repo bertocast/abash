@@ -629,6 +629,7 @@ impl VirtualSession {
             "diff" => self.run_diff(cwd, args, metadata),
             "column" => self.run_column(cwd, args, stdin, metadata),
             "chmod" => self.run_chmod(cwd, args, metadata),
+            "python" => self.run_python3(cwd, args, stdin, &env, timeout_ms, cancel_flag, metadata),
             "python3" => {
                 self.run_python3(cwd, args, stdin, &env, timeout_ms, cancel_flag, metadata)
             }
@@ -3977,6 +3978,7 @@ mod tests {
                 "diff",
                 "column",
                 "chmod",
+                "python",
                 "python3",
                 "xargs",
                 "rg",

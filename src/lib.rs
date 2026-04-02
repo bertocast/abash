@@ -337,6 +337,7 @@ fn default_allowlisted_commands() -> Vec<String> {
         "diff".to_string(),
         "column".to_string(),
         "chmod".to_string(),
+        "python".to_string(),
         "python3".to_string(),
         "xargs".to_string(),
         "rg".to_string(),
