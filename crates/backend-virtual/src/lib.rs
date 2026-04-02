@@ -112,6 +112,7 @@ impl SessionBackend for VirtualSession {
             self.exported_env.clone(),
             request.env.clone(),
             self.aliases.clone(),
+            request.argv.clone(),
         );
 
         if cancel_flag.load(Ordering::SeqCst) {
@@ -409,8 +410,10 @@ impl VirtualSession {
 
         for (index, command) in pipeline.commands.iter().enumerate() {
             validate_pipeline_redirections(pipeline, index, command)?;
-            let command_env = expand_command_env(&command.assignments, &runtime.env)?;
-            let expanded_argv = expand_words(&command.argv, &command_env)?;
+            let command_env =
+                expand_command_env(&command.assignments, &runtime.env, &runtime.positional_args)?;
+            let expanded_argv =
+                expand_words(&command.argv, &command_env, &runtime.positional_args)?;
             let expanded_argv = resolve_alias_words(&expanded_argv, &runtime.aliases)?;
             let command_name = expanded_argv.first().cloned().ok_or_else(|| {
                 SandboxError::InvalidRequest(
@@ -420,7 +423,10 @@ impl VirtualSession {
             let args = self.expand_script_args(&runtime.cwd, &command_name, &expanded_argv[1..])?;
 
             let stdin = if let Some(path) = input_redirect(command) {
-                let resolved = resolve_sandbox_path(&runtime.cwd, &path.expand(&command_env)?)?;
+                let resolved = resolve_sandbox_path(
+                    &runtime.cwd,
+                    &path.expand(&command_env, &runtime.positional_args)?,
+                )?;
                 self.filesystem.read_file(&resolved)?
             } else if let Some(input) = piped_stdin.take() {
                 input
@@ -455,6 +461,7 @@ impl VirtualSession {
                 &result.stdout,
                 &result.stderr,
                 &command_env,
+                &runtime.positional_args,
             )?;
             pipeline_stderr.extend(&routed.stderr);
             let mut result = result;
@@ -779,6 +786,7 @@ impl VirtualSession {
         stdout: &[u8],
         stderr: &[u8],
         env: &BTreeMap<String, String>,
+        positional_args: &[String],
     ) -> Result<RoutedOutput, SandboxError> {
         let mut stdout_target = StreamTarget::StdoutCapture;
         let mut stderr_target = StreamTarget::StderrCapture;
@@ -787,16 +795,40 @@ impl VirtualSession {
             match redirect {
                 RedirectSpec::Input(_) => {}
                 RedirectSpec::StdoutTruncate(path) => {
-                    stdout_target = StreamTarget::File(resolve_file_target(cwd, path, env, false)?);
+                    stdout_target = StreamTarget::File(resolve_file_target(
+                        cwd,
+                        path,
+                        env,
+                        positional_args,
+                        false,
+                    )?);
                 }
                 RedirectSpec::StdoutAppend(path) => {
-                    stdout_target = StreamTarget::File(resolve_file_target(cwd, path, env, true)?);
+                    stdout_target = StreamTarget::File(resolve_file_target(
+                        cwd,
+                        path,
+                        env,
+                        positional_args,
+                        true,
+                    )?);
                 }
                 RedirectSpec::StderrTruncate(path) => {
-                    stderr_target = StreamTarget::File(resolve_file_target(cwd, path, env, false)?);
+                    stderr_target = StreamTarget::File(resolve_file_target(
+                        cwd,
+                        path,
+                        env,
+                        positional_args,
+                        false,
+                    )?);
                 }
                 RedirectSpec::StderrAppend(path) => {
-                    stderr_target = StreamTarget::File(resolve_file_target(cwd, path, env, true)?);
+                    stderr_target = StreamTarget::File(resolve_file_target(
+                        cwd,
+                        path,
+                        env,
+                        positional_args,
+                        true,
+                    )?);
                 }
                 RedirectSpec::StderrToStdout => {
                     stderr_target = stdout_target.clone();
@@ -3260,6 +3292,7 @@ struct RuntimeState {
     env: BTreeMap<String, String>,
     exported_env: BTreeMap<String, String>,
     aliases: BTreeMap<String, Vec<String>>,
+    positional_args: Vec<String>,
 }
 
 impl RuntimeState {
@@ -3269,6 +3302,7 @@ impl RuntimeState {
         exported_env: BTreeMap<String, String>,
         request_env: BTreeMap<String, String>,
         aliases: BTreeMap<String, Vec<String>>,
+        positional_args: Vec<String>,
     ) -> Self {
         let mut env = exported_env.clone();
         env.extend(request_env);
@@ -3278,6 +3312,7 @@ impl RuntimeState {
             env,
             exported_env,
             aliases,
+            positional_args,
         }
     }
 
@@ -3363,10 +3398,11 @@ fn resolve_file_target(
     cwd: &str,
     path: &ScriptWord,
     env: &BTreeMap<String, String>,
+    positional_args: &[String],
     append: bool,
 ) -> Result<FileTarget, SandboxError> {
     Ok(FileTarget {
-        path: resolve_sandbox_path(cwd, &path.expand(env)?)?,
+        path: resolve_sandbox_path(cwd, &path.expand(env, positional_args)?)?,
         append,
     })
 }
@@ -3403,10 +3439,11 @@ fn route_stream(
 fn expand_command_env(
     assignments: &[(String, ScriptWord)],
     base_env: &BTreeMap<String, String>,
+    positional_args: &[String],
 ) -> Result<BTreeMap<String, String>, SandboxError> {
     let mut env = base_env.clone();
     for (name, value) in assignments {
-        env.insert(name.clone(), value.expand(&env)?);
+        env.insert(name.clone(), value.expand(&env, positional_args)?);
     }
     Ok(env)
 }
@@ -3414,8 +3451,17 @@ fn expand_command_env(
 fn expand_words(
     words: &[ScriptWord],
     env: &BTreeMap<String, String>,
+    positional_args: &[String],
 ) -> Result<Vec<String>, SandboxError> {
-    words.iter().map(|word| word.expand(env)).collect()
+    let mut expanded = Vec::new();
+    for word in words {
+        if word.expands_to_positional_args() {
+            expanded.extend(positional_args.iter().cloned());
+        } else {
+            expanded.push(word.expand(env, positional_args)?);
+        }
+    }
+    Ok(expanded)
 }
 
 fn resolve_alias_words(
@@ -4416,6 +4462,7 @@ mod tests {
                 b"out",
                 b"err",
                 &BTreeMap::new(),
+                &[],
             )
             .unwrap();
         assert!(merged.stdout.is_empty());
@@ -4436,6 +4483,7 @@ mod tests {
                 b"out",
                 b"err",
                 &BTreeMap::new(),
+                &[],
             )
             .unwrap();
         assert_eq!(routed.stdout, b"err".to_vec());

@@ -29,7 +29,7 @@
 - command chaining (`;`, `&&`, `||`): supported
 - minimal `if` control flow (`if ...; then ...; fi`, optional `else`): supported
 - command-local assignment prefixes (`FOO=bar cmd`): supported
-- `$NAME`, `${NAME}`, and `${NAME:-default}` expansion: supported in script mode
+- `$NAME`, `${NAME}`, `${NAME:-default}`, `$1`, `$2`, `$@`, and `$#` expansion: supported in script mode
 - argument globbing with `*`, `?`, and bracket classes: supported in script mode
 - literal `grep` with `-n` / `-v`: supported
 - aggregate `wc` with `-l`, `-w`, `-c`: supported

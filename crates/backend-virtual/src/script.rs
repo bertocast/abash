@@ -97,16 +97,24 @@ impl ScriptWord {
         output
     }
 
-    pub(crate) fn expand(&self, env: &BTreeMap<String, String>) -> Result<String, SandboxError> {
+    pub(crate) fn expand(
+        &self,
+        env: &BTreeMap<String, String>,
+        positional_args: &[String],
+    ) -> Result<String, SandboxError> {
         let mut output = String::new();
         for part in &self.parts {
             if part.expandable {
-                output.push_str(&expand_part(&part.text, env)?);
+                output.push_str(&expand_part(&part.text, env, positional_args)?);
             } else {
                 output.push_str(&part.text);
             }
         }
         Ok(output)
+    }
+
+    pub(crate) fn expands_to_positional_args(&self) -> bool {
+        self.parts.len() == 1 && self.parts[0].expandable && self.parts[0].text == "$@"
     }
 
     fn is_keyword(&self, keyword: &str) -> bool {
@@ -578,7 +586,11 @@ fn is_valid_assignment_name(value: &str) -> bool {
     chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
-fn expand_part(part: &str, env: &BTreeMap<String, String>) -> Result<String, SandboxError> {
+fn expand_part(
+    part: &str,
+    env: &BTreeMap<String, String>,
+    positional_args: &[String],
+) -> Result<String, SandboxError> {
     let mut output = String::new();
     let chars = part.chars().collect::<Vec<_>>();
     let mut index = 0usize;
@@ -623,11 +635,47 @@ fn expand_part(part: &str, env: &BTreeMap<String, String>) -> Result<String, San
                 Some(value) if !value.is_empty() => output.push_str(value),
                 _ => {
                     if let Some(default) = default_value {
-                        output.push_str(&expand_part(default, env)?);
+                        output.push_str(&expand_part(default, env, positional_args)?);
                     }
                 }
             }
             index += 1;
+            continue;
+        }
+
+        if chars[index + 1] == '#' {
+            output.push_str(&positional_args.len().to_string());
+            index += 2;
+            continue;
+        }
+
+        if chars[index + 1] == '@' {
+            output.push_str(&positional_args.join(" "));
+            index += 2;
+            continue;
+        }
+
+        if chars[index + 1].is_ascii_digit() {
+            let mut cursor = index + 1;
+            let mut digits = String::new();
+            while cursor < chars.len() && chars[cursor].is_ascii_digit() {
+                digits.push(chars[cursor]);
+                cursor += 1;
+            }
+            let position = digits.parse::<usize>().map_err(|_| {
+                SandboxError::InvalidRequest(
+                    "invalid positional parameter expansion in script".to_string(),
+                )
+            })?;
+            if position > 0 {
+                output.push_str(
+                    positional_args
+                        .get(position - 1)
+                        .map(String::as_str)
+                        .unwrap_or(""),
+                );
+            }
+            index = cursor;
             continue;
         }
 
@@ -732,7 +780,7 @@ mod tests {
         let env = BTreeMap::from([(String::from("NAME"), String::from("demo"))]);
         let values = word
             .iter()
-            .map(|part| part.expand(&env).unwrap())
+            .map(|part| part.expand(&env, &[]).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(values, vec!["$NAME", "demo", "demo"]);
     }
@@ -746,16 +794,31 @@ mod tests {
         ]);
 
         assert_eq!(
-            expand_part("${SET:-default}", &env).unwrap(),
+            expand_part("${SET:-default}", &env, &[]).unwrap(),
             "value".to_string()
         );
         assert_eq!(
-            expand_part("${EMPTY:-default}", &env).unwrap(),
+            expand_part("${EMPTY:-default}", &env, &[]).unwrap(),
             "default".to_string()
         );
         assert_eq!(
-            expand_part("${MISSING:-$FALLBACK}", &env).unwrap(),
+            expand_part("${MISSING:-$FALLBACK}", &env, &[]).unwrap(),
             "fallback".to_string()
+        );
+    }
+
+    #[test]
+    fn expansion_supports_positional_parameters() {
+        let positional = vec!["first".to_string(), "second".to_string()];
+        let env = BTreeMap::new();
+
+        assert_eq!(expand_part("$1", &env, &positional).unwrap(), "first");
+        assert_eq!(expand_part("$2", &env, &positional).unwrap(), "second");
+        assert_eq!(expand_part("$3", &env, &positional).unwrap(), "");
+        assert_eq!(expand_part("$#", &env, &positional).unwrap(), "2");
+        assert_eq!(
+            expand_part("$@", &env, &positional).unwrap(),
+            "first second"
         );
     }
 

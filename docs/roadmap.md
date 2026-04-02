@@ -19,8 +19,6 @@ Recommended focus:
 
 `just-bash` advertises a broader shell language:
 
-- `${VAR:-default}`
-- positional parameters: `$1`, `$2`, `$@`, `$#`
 - `elif`
 - functions
 - `local`
@@ -28,17 +26,14 @@ Recommended focus:
 
 Recommended order:
 
-1. `${VAR:-default}`
-2. positional parameters
-3. `elif`
-4. `while`
-5. `for`
-6. functions and `local`
-7. `until`
+1. `elif`
+2. `while`
+3. `for`
+4. functions and `local`
+5. `until`
 
 Rationale:
 
-- default expansion and positional params unlock many practical agent scripts
 - `elif` and `while` raise script usefulness faster than jumping straight to functions
 - functions and `local` should come after loop/control-flow semantics are stable
 
@@ -63,7 +58,7 @@ Decision track:
 
 Recommended next step:
 
-- define the intended long-term execution-state model before deepening functions and positional parameters
+- define the intended long-term execution-state model before deepening functions and local-variable semantics
 
 ## Command Behavior
 
@@ -166,11 +161,9 @@ Recommended order:
 
 If the goal is to move closer to `just-bash` with high payoff and controlled scope:
 
-1. `${VAR:-default}`
-2. positional parameters
-3. `elif`
-4. `while`
-5. `grep` depth
-6. hard links in `ln`
-7. execution-state decision
-8. custom command registration
+1. `elif`
+2. `while`
+3. `grep` depth
+4. hard links in `ln`
+5. execution-state decision
+6. custom command registration

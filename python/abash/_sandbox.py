@@ -389,6 +389,7 @@ class Bash:
         self,
         script: str,
         *,
+        argv: list[str] | None = None,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         stdin: str | bytes | None = None,
@@ -401,7 +402,7 @@ class Bash:
             raise RuntimeError("Bash session is closed")
 
         request = _build_request(
-            [],
+            list(argv or []),
             mode=ExecutionMode.SCRIPT,
             script=script,
             cwd=cwd,
@@ -432,6 +433,7 @@ class Bash:
         self,
         script: str,
         *,
+        argv: list[str] | None = None,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         stdin: str | bytes | None = None,
@@ -442,6 +444,7 @@ class Bash:
     ) -> ExecutionResult:
         run = await self.exec_detached_script(
             script,
+            argv=argv,
             cwd=cwd,
             env=env,
             stdin=stdin,

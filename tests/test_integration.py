@@ -1334,6 +1334,18 @@ async def test_script_mode_expands_default_variables() -> None:
 
 
 @pytest.mark.anyio
+async def test_script_mode_expands_positional_parameters() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script(
+            "echo $1 $2 $# $@ ${MISSING:-$2}",
+            argv=["bert", "core"],
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "bert core 2 bert core core\n"
+
+
+@pytest.mark.anyio
 async def test_script_mode_supports_command_local_assignments() -> None:
     async with Bash() as bash:
         local = await bash.exec_script("FOO=hello BAR=${FOO}-world printenv FOO BAR")
