@@ -62,8 +62,8 @@ Many commands now exist by name in both projects, but `just-bash` is still broad
 
 Highest-priority work:
 
+- `yq`: XML/INI/front-matter/in-place surface beyond the current YAML/JSON/TOML/CSV slice
 - `awk`: broader language surface
-- `yq`: more formats and broader transcoding surface
 - `xan`: additional CSV subcommands beyond the current narrow slice
 
 Recommended order:
@@ -74,7 +74,7 @@ Recommended order:
 
 Rationale:
 
-- `grep`, `ln`, execution reset-mode, and a broader `jq` slice are landed; `yq` now has the clearest remaining data-workflow payoff
+- `grep`, `ln`, execution reset-mode, a broader `jq` slice, and YAML/JSON/TOML/CSV `yq` transcoding are landed; `yq` still has the clearest remaining data-workflow payoff because XML/INI/front-matter are still absent
 - `jq` and `yq` affect high-value agent data workflows
 - `xan` and `awk` are larger interpreter-style expansions and should follow clearer wins
 

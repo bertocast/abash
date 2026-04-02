@@ -608,6 +608,43 @@ async def test_argv_mode_yq_supports_json_input_and_exit_status() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_yq_auto_detects_toml_and_supports_toml_output() -> None:
+    async with Bash() as bash:
+        await bash.write_file(
+            "/workspace/Cargo.toml",
+            '[package]\nname = "abash"\nversion = "0.1.0"\n',
+        )
+        name = await bash.exec(["yq", "-r", ".package.name", "/workspace/Cargo.toml"])
+        package = await bash.exec(
+            ["yq", "-o", "toml", ".package", "/workspace/Cargo.toml"]
+        )
+
+    assert name.exit_code == 0
+    assert name.stdout == "abash\n"
+    assert package.stdout == 'name = "abash"\nversion = "0.1.0"\n'
+
+
+@pytest.mark.anyio
+async def test_argv_mode_yq_supports_csv_input_and_output() -> None:
+    async with Bash() as bash:
+        await bash.write_file(
+            "/workspace/users.csv",
+            "name,age\nbert,34\nana,29\n",
+        )
+        selected = await bash.exec(
+            ["yq", "-p", "csv", "-o", "json", "-c", "[.[] | select(.age > 30) | .name]", "/workspace/users.csv"],
+        )
+        rendered = await bash.exec(
+            ["yq", "-p", "json", "-o", "csv", ".users"],
+            stdin='{"users":[{"name":"bert","age":34},{"name":"ana","age":29}]}\n',
+        )
+
+    assert selected.exit_code == 0
+    assert selected.stdout == '["bert"]\n'
+    assert rendered.stdout == "age,name\n34,bert\n29,ana\n"
+
+
+@pytest.mark.anyio
 async def test_script_mode_yq_works_in_pipelines_without_globbing_filter() -> None:
     async with Bash() as bash:
         await bash.write_file(

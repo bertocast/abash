@@ -17,6 +17,7 @@ sha1 = { workspace = true }
 sha2 = { workspace = true }
 tar = { workspace = true }
 time = { workspace = true }
+toml = { workspace = true }
 turndown = { workspace = true }
 ureq = { workspace = true }
 url = { workspace = true }
