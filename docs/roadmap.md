@@ -47,15 +47,14 @@ Rationale:
 
 This is a meaningful behavioral difference. It is not automatically wrong, but it should become an explicit product choice rather than accidental drift.
 
-Decision track:
+Current state:
 
-1. keep session-persistent semantics and document the divergence more strongly
-2. add a `just-bash`-style reset mode
-3. move default behavior closer to per-exec reset semantics
+1. default session-persistent semantics remain in place
+2. opt-in `session_state="per_exec"` now provides a `just-bash`-style reset mode
 
 Recommended next step:
 
-- define the intended long-term execution-state model before deepening functions and local-variable semantics
+- decide whether the long-term default should stay persistent or move closer to per-exec reset semantics before deepening functions and local-variable semantics
 
 ## Command Behavior
 
@@ -63,23 +62,21 @@ Many commands now exist by name in both projects, but `just-bash` is still broad
 
 Highest-priority work:
 
-- `ln`: hard-link support
-- `awk`: broader language surface
 - `jq`: larger filter language and builtin coverage
+- `awk`: broader language surface
 - `yq`: more formats and broader transcoding surface
 - `xan`: additional CSV subcommands beyond the current narrow slice
 
 Recommended order:
 
-1. `ln` hard links
-2. `jq`
-3. `yq`
-4. `xan`
-5. `awk`
+1. `jq`
+2. `yq`
+3. `xan`
+4. `awk`
 
 Rationale:
 
-- `grep` work is landed; next concrete command-behavior mismatch is hard-link support in `ln`
+- `grep`, `ln`, and execution reset-mode work are landed; `jq` and `yq` now offer the clearest workflow payoff
 - `jq` and `yq` affect high-value agent data workflows
 - `xan` and `awk` are larger interpreter-style expansions and should follow clearer wins
 

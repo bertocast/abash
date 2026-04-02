@@ -50,7 +50,7 @@ mod yq;
 
 use abash_core::{
     create_filesystem, resolve_sandbox_path, ExecutionMode, ExecutionRequest, ExecutionResult,
-    FilesystemMode, SandboxConfig, SandboxError, SandboxFilesystem, SessionBackend,
+    FilesystemMode, SandboxConfig, SandboxError, SandboxFilesystem, SessionBackend, SessionState,
     TerminationReason,
 };
 use script::{
@@ -63,6 +63,8 @@ use url::Url;
 pub fn create_session(config: SandboxConfig) -> Result<Box<dyn SessionBackend>, SandboxError> {
     Ok(Box::new(VirtualSession {
         filesystem: create_filesystem(&config)?,
+        default_cwd: config.default_cwd.clone(),
+        session_state: config.session_state.clone(),
         current_cwd: config.default_cwd.clone(),
         exported_env: BTreeMap::new(),
         aliases: BTreeMap::new(),
@@ -72,6 +74,8 @@ pub fn create_session(config: SandboxConfig) -> Result<Box<dyn SessionBackend>, 
 
 struct VirtualSession {
     filesystem: Box<dyn SandboxFilesystem>,
+    default_cwd: String,
+    session_state: SessionState,
     current_cwd: String,
     exported_env: BTreeMap<String, String>,
     aliases: BTreeMap<String, Vec<String>>,
@@ -101,18 +105,34 @@ impl SessionBackend for VirtualSession {
             ));
         }
 
+        let persisted_cwd = match self.session_state {
+            SessionState::Persistent => self.current_cwd.clone(),
+            SessionState::PerExec => self.default_cwd.clone(),
+        };
+        let exported_env = match self.session_state {
+            SessionState::Persistent => self.exported_env.clone(),
+            SessionState::PerExec => BTreeMap::new(),
+        };
+        let aliases = match self.session_state {
+            SessionState::Persistent => self.aliases.clone(),
+            SessionState::PerExec => BTreeMap::new(),
+        };
+        if matches!(self.session_state, SessionState::PerExec) {
+            self.history.clear();
+        }
+
         let requested_cwd = if request.cwd.is_empty() {
-            self.current_cwd.clone()
+            persisted_cwd.clone()
         } else {
             request.cwd.clone()
         };
         let cwd = resolve_sandbox_path(&config.default_cwd, &requested_cwd)?;
         let mut runtime = RuntimeState::new(
             cwd,
-            self.current_cwd.clone(),
-            self.exported_env.clone(),
+            persisted_cwd,
+            exported_env,
             request.env.clone(),
-            self.aliases.clone(),
+            aliases,
             request.argv.clone(),
         );
 
@@ -129,9 +149,11 @@ impl SessionBackend for VirtualSession {
             ExecutionMode::Script => self.run_script(&mut runtime, request, config, cancel_flag),
         };
 
-        self.current_cwd = runtime.persisted_cwd.clone();
-        self.exported_env = runtime.exported_env.clone();
-        self.aliases = runtime.aliases.clone();
+        if matches!(self.session_state, SessionState::Persistent) {
+            self.current_cwd = runtime.persisted_cwd.clone();
+            self.exported_env = runtime.exported_env.clone();
+            self.aliases = runtime.aliases.clone();
+        }
 
         result
     }
@@ -4283,7 +4305,7 @@ mod tests {
     use std::fs;
     use std::sync::{atomic::AtomicBool, Arc};
 
-    use abash_core::{ExecutionProfile, SandboxSession};
+    use abash_core::{ExecutionProfile, SandboxSession, SessionState};
     use tempfile::TempDir;
 
     use super::*;
@@ -4292,6 +4314,7 @@ mod tests {
         SandboxConfig {
             profile: ExecutionProfile::Safe,
             filesystem_mode: FilesystemMode::Memory,
+            session_state: SessionState::Persistent,
             allowlisted_commands: [
                 "echo",
                 "env",
@@ -4523,6 +4546,7 @@ mod tests {
         let config = SandboxConfig {
             profile: ExecutionProfile::Workspace,
             filesystem_mode: FilesystemMode::HostReadonly,
+            session_state: SessionState::Persistent,
             allowlisted_commands: ["cat"]
                 .into_iter()
                 .map(ToString::to_string)
@@ -4571,6 +4595,8 @@ mod tests {
         let config = memory_config();
         let mut session = VirtualSession {
             filesystem: create_filesystem(&config).unwrap(),
+            default_cwd: config.default_cwd.clone(),
+            session_state: SessionState::Persistent,
             current_cwd: config.default_cwd.clone(),
             exported_env: BTreeMap::new(),
             aliases: BTreeMap::new(),

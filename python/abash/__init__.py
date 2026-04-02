@@ -11,6 +11,7 @@ from ._models import (
     RunEvent,
     RunStatus,
     SanitizedError,
+    SessionState,
     TerminationReason,
 )
 from ._sandbox import Bash, BashRun, normalize_sandbox_path
@@ -30,6 +31,7 @@ __all__ = [
     "RunEvent",
     "RunStatus",
     "SanitizedError",
+    "SessionState",
     "TerminationReason",
     "normalize_sandbox_path",
 ]

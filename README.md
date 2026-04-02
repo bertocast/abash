@@ -87,6 +87,7 @@ Command-name parity work is tracked in [docs/pending_commands.md](docs/pending_c
 - `Bash.audit_events()` returns buffered sanitized audit records for session and policy activity.
 - Output is buffered; there is no live streaming guarantee in Phase 4 v1.
 - Only one active run is allowed per `Bash` session.
+- `Bash(session_state="per_exec")` opts into `just-bash`-style shell-state reset between calls while keeping the filesystem shared.
 
 ## Script Compatibility
 

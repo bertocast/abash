@@ -6,6 +6,7 @@ class NativeSandbox:
         profile: str,
         filesystem_mode: str,
         allowlisted_commands: Sequence[str],
+        session_state: str,
         workspace_root: str | None = None,
         writable_roots: list[str] | None = None,
         network_policy_json: str | None = None,

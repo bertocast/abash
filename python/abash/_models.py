@@ -24,6 +24,11 @@ class FilesystemMode(str, Enum):
     HOST_READWRITE = "host_readwrite"
 
 
+class SessionState(str, Enum):
+    PERSISTENT = "persistent"
+    PER_EXEC = "per_exec"
+
+
 class ErrorKind(str, Enum):
     POLICY_DENIED = "policy_denied"
     TIMEOUT = "timeout"
@@ -117,6 +122,7 @@ class ExecutionResult:
 class BashOptions:
     profile: ExecutionProfile = ExecutionProfile.SAFE
     filesystem_mode: FilesystemMode = FilesystemMode.MEMORY
+    session_state: SessionState = SessionState.PERSISTENT
     workspace_root: str | None = None
     writable_roots: list[str] = field(default_factory=list)
     allowlisted_commands: list[str] = field(default_factory=list)

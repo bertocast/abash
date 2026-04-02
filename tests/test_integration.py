@@ -21,6 +21,7 @@ from abash import (
     NetworkOrigin,
     NetworkPolicy,
     RunStatus,
+    SessionState,
 )
 
 
@@ -1758,6 +1759,27 @@ async def test_tier3_export_and_history_persist_across_session() -> None:
     assert env_result.stdout == "core\n"
     assert "export TEAM=core" in history.stdout
     assert "printenv TEAM" in history.stdout
+
+
+@pytest.mark.anyio
+async def test_per_exec_session_state_resets_shell_state_between_calls() -> None:
+    async with Bash(session_state=SessionState.PER_EXEC) as bash:
+        exported = await bash.exec(["export", "TEAM=core"])
+        env_result = await bash.exec(["printenv", "TEAM"])
+        aliased = await bash.exec(["alias", "ll=ls -l"])
+        alias_use = await bash.exec(["ll"])
+        changed = await bash.exec_script("mkdir -p /workspace/demo/inner; cd /workspace/demo/inner; pwd")
+        after = await bash.exec(["pwd"])
+        history = await bash.exec(["history"])
+
+    assert exported.exit_code == 0
+    assert env_result.stdout == ""
+    assert aliased.stdout == "ll='ls -l'\n"
+    assert alias_use.error is not None
+    assert alias_use.error.kind is ErrorKind.POLICY_DENIED
+    assert changed.stdout == "/workspace/demo/inner\n"
+    assert after.stdout == "/\n"
+    assert history.stdout.strip() == "1  history"
 
 
 @pytest.mark.anyio

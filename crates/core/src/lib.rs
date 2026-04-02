@@ -49,6 +49,21 @@ impl FilesystemMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionState {
+    Persistent,
+    PerExec,
+}
+
+impl SessionState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Persistent => "persistent",
+            Self::PerExec => "per_exec",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminationReason {
     Exited,
     Timeout,
@@ -117,6 +132,7 @@ impl Default for ResourceLimits {
 pub struct SandboxConfig {
     pub profile: ExecutionProfile,
     pub filesystem_mode: FilesystemMode,
+    pub session_state: SessionState,
     pub allowlisted_commands: BTreeSet<String>,
     pub default_cwd: String,
     pub workspace_root: Option<PathBuf>,
@@ -396,6 +412,10 @@ impl SandboxSession {
         metadata.insert(
             "filesystem_mode".to_string(),
             self.config.filesystem_mode.as_str().to_string(),
+        );
+        metadata.insert(
+            "session_state".to_string(),
+            self.config.session_state.as_str().to_string(),
         );
         if self.config.workspace_root.is_some() {
             metadata.insert("workspace_mount".to_string(), "/workspace".to_string());

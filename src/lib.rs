@@ -4,7 +4,7 @@ use std::sync::{atomic::AtomicBool, Arc};
 use abash_core::{
     default_cwd_for_mode, normalize_sandbox_path as core_normalize_sandbox_path,
     parse_network_policy_json, ExecutionMode, ExecutionProfile, ExecutionRequest, FilesystemMode,
-    SandboxConfig, SandboxError, SandboxSession, SessionBackend,
+    SandboxConfig, SandboxError, SandboxSession, SessionBackend, SessionState,
 };
 use parking_lot::Mutex;
 use pyo3::exceptions::PyValueError;
@@ -35,6 +35,7 @@ impl NativeSandbox {
         profile,
         filesystem_mode,
         allowlisted_commands,
+        session_state="persistent",
         workspace_root=None,
         writable_roots=None,
         network_policy_json=None,
@@ -45,6 +46,7 @@ impl NativeSandbox {
         profile: String,
         filesystem_mode: String,
         allowlisted_commands: Vec<String>,
+        session_state: &str,
         workspace_root: Option<String>,
         writable_roots: Option<Vec<String>>,
         network_policy_json: Option<String>,
@@ -53,6 +55,7 @@ impl NativeSandbox {
     ) -> PyResult<Self> {
         let profile = parse_profile(&profile)?;
         let filesystem_mode = parse_filesystem_mode(&filesystem_mode)?;
+        let session_state = parse_session_state(session_state)?;
         let allowlisted_commands = if allowlisted_commands.is_empty() {
             default_allowlisted_commands()
                 .into_iter()
@@ -64,6 +67,7 @@ impl NativeSandbox {
         let config = SandboxConfig {
             profile: profile.clone(),
             filesystem_mode: filesystem_mode.clone(),
+            session_state,
             allowlisted_commands,
             default_cwd: default_cwd_for_mode(&filesystem_mode).to_string(),
             workspace_root: workspace_root.map(Into::into),
@@ -442,6 +446,16 @@ fn parse_filesystem_mode(value: &str) -> PyResult<FilesystemMode> {
         "host_readwrite" => Ok(FilesystemMode::HostReadwrite),
         _ => Err(PyValueError::new_err(format!(
             "unsupported filesystem mode: {value}"
+        ))),
+    }
+}
+
+fn parse_session_state(value: &str) -> PyResult<SessionState> {
+    match value {
+        "persistent" => Ok(SessionState::Persistent),
+        "per_exec" => Ok(SessionState::PerExec),
+        _ => Err(PyValueError::new_err(format!(
+            "unsupported session state: {value}"
         ))),
     }
 }

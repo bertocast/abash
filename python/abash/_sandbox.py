@@ -21,6 +21,7 @@ from ._models import (
     RunEvent,
     RunStatus,
     SanitizedError,
+    SessionState,
     TerminationReason,
 )
 from ._native import (
@@ -252,6 +253,7 @@ class Bash:
         *,
         profile: ExecutionProfile = ExecutionProfile.SAFE,
         filesystem_mode: FilesystemMode = FilesystemMode.MEMORY,
+        session_state: SessionState = SessionState.PERSISTENT,
         workspace_root: str | None = None,
         writable_roots: Iterable[str] | None = None,
         allowlisted_commands: Iterable[str] | None = None,
@@ -263,6 +265,7 @@ class Bash:
         options = options or BashOptions(
             profile=profile,
             filesystem_mode=filesystem_mode,
+            session_state=session_state,
             workspace_root=workspace_root,
             writable_roots=list(writable_roots or ()),
             allowlisted_commands=list(allowlisted_commands or ()),
@@ -277,6 +280,7 @@ class Bash:
             options.profile.value,
             options.filesystem_mode.value,
             commands,
+            options.session_state.value,
             options.workspace_root,
             list(options.writable_roots),
             _network_policy_json(options.network_policy),
@@ -286,6 +290,7 @@ class Bash:
         self.options = BashOptions(
             profile=options.profile,
             filesystem_mode=options.filesystem_mode,
+            session_state=options.session_state,
             workspace_root=options.workspace_root,
             writable_roots=list(options.writable_roots),
             allowlisted_commands=commands,
@@ -301,6 +306,7 @@ class Bash:
         *,
         profile: ExecutionProfile = ExecutionProfile.SAFE,
         filesystem_mode: FilesystemMode = FilesystemMode.MEMORY,
+        session_state: SessionState = SessionState.PERSISTENT,
         workspace_root: str | None = None,
         writable_roots: Iterable[str] | None = None,
         allowlisted_commands: Iterable[str] | None = None,
@@ -311,6 +317,7 @@ class Bash:
         return cls(
             profile=profile,
             filesystem_mode=filesystem_mode,
+            session_state=session_state,
             workspace_root=workspace_root,
             writable_roots=writable_roots,
             allowlisted_commands=allowlisted_commands,

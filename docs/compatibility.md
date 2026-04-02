@@ -18,6 +18,7 @@
 - filesystem session persistence for `memory` and `host_cow`
 - host-backed workspace modes with one `/workspace` mount
 - scoped writable roots for `host_readwrite`
+- opt-in `session_state="per_exec"` shell-state reset between calls
 
 ## Script Compatibility Matrix
 
@@ -51,6 +52,7 @@
 - narrow `time` and `timeout` wrappers around one nested command: supported
 - narrow `whoami`, `hostname`, `help`, and `clear`: supported
 - buffered per-session `history`: supported
+- default session-persistent `cd`, `export`, aliases, and history, with opt-in `per_exec` reset mode: supported
 - narrow `alias` / `unalias`: supported
 - narrow `bash` / `sh` with `-c <script>` or one script path: supported, child-shell state stays isolated
 - narrow `curl` with policy-gated `-X`, `-d`, `-I`, `-i`, `-o`, and `-L`: supported
