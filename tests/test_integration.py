@@ -212,12 +212,15 @@ async def test_argv_mode_text_builtins_support_stdin_and_exit_codes() -> None:
     async with Bash() as bash:
         grep_hit = await bash.exec(["grep", "beta"], stdin="alpha\nbeta\n")
         grep_miss = await bash.exec(["grep", "gamma"], stdin="alpha\nbeta\n")
+        egrep_hit = await bash.exec(["egrep", "beta"], stdin="alpha\nbeta\n")
         wc_result = await bash.exec(["wc", "-l", "-w", "-c"], stdin="one two\nthree\n")
 
     assert grep_hit.exit_code == 0
     assert grep_hit.stdout == "beta\n"
     assert grep_miss.exit_code == 1
     assert grep_miss.stdout == ""
+    assert egrep_hit.exit_code == 0
+    assert egrep_hit.stdout == "beta\n"
     assert wc_result.stdout == "2 3 14\n"
 
 

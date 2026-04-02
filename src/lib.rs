@@ -296,6 +296,7 @@ fn default_allowlisted_commands() -> Vec<String> {
         "printenv".to_string(),
         "cat".to_string(),
         "grep".to_string(),
+        "egrep".to_string(),
         "wc".to_string(),
         "sort".to_string(),
         "uniq".to_string(),

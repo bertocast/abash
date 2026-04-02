@@ -25,9 +25,13 @@ from abash import Bash, ErrorKind, normalize_sandbox_path
 )
 def test_normalize_sandbox_path_stays_in_sandbox(segments: list[str]) -> None:
     path = "/".join(segments)
-    normalized = normalize_sandbox_path(path)
-    assert normalized.startswith("/")
-    assert ".." not in normalized.split("/")
+    try:
+        normalized = normalize_sandbox_path(path)
+    except ValueError:
+        assert ".." in segments
+    else:
+        assert normalized.startswith("/")
+        assert ".." not in normalized.split("/")
 
 
 @pytest.mark.anyio

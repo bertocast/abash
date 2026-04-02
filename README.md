@@ -57,7 +57,7 @@ Pending commands from [docs/pending_commands.md](docs/pending_commands.md):
 
 ### Tier 5
 
-- `egrep`, `fgrep`
+- `fgrep`
 
 ## Filesystem Modes
 

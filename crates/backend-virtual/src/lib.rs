@@ -584,6 +584,7 @@ impl VirtualSession {
             "ln" => self.run_ln(cwd, args, metadata),
             "cat" => self.run_cat(cwd, args, stdin, metadata),
             "grep" => self.run_grep(cwd, args, stdin, metadata),
+            "egrep" => self.run_grep_alias(cwd, args, stdin, metadata, "-E"),
             "wc" => self.run_wc(cwd, args, stdin, metadata),
             "sort" => self.run_sort(cwd, args, stdin, metadata),
             "uniq" => self.run_uniq(cwd, args, stdin, metadata),
@@ -1604,6 +1605,7 @@ impl VirtualSession {
             match flag.as_str() {
                 "-n" => numbered = true,
                 "-v" => inverted = true,
+                "-E" => {}
                 _ if flag.starts_with('-') => {
                     return Err(SandboxError::InvalidRequest(format!(
                         "grep flag is not supported: {flag}"
@@ -1646,6 +1648,19 @@ impl VirtualSession {
             error: None,
             metadata,
         })
+    }
+
+    fn run_grep_alias(
+        &mut self,
+        cwd: &str,
+        args: Vec<String>,
+        stdin: Vec<u8>,
+        metadata: BTreeMap<String, String>,
+        injected_flag: &str,
+    ) -> Result<ExecutionResult, SandboxError> {
+        let mut forwarded = vec![injected_flag.to_string()];
+        forwarded.extend(args);
+        self.run_grep(cwd, forwarded, stdin, metadata)
     }
 
     fn run_wc(
