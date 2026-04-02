@@ -493,6 +493,26 @@ async def test_script_mode_awk_works_in_text_pipelines() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_awk_supports_begin_end_vars_and_accumulators() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/sales.csv", "bert,core,2\nana,product,9\ncami,core,3\n")
+        result = await bash.exec(
+            [
+                "awk",
+                "-F",
+                ",",
+                "-v",
+                "greeting=hello",
+                'BEGIN { total = 0; print greeting } $2 == "core" { total += $3 } END { print total, FILENAME }',
+                "/workspace/sales.csv",
+            ]
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "hello\n5 /workspace/sales.csv\n"
+
+
+@pytest.mark.anyio
 async def test_argv_mode_jq_supports_paths_slices_and_raw_output() -> None:
     async with Bash() as bash:
         result = await bash.exec(
