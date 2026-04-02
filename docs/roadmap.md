@@ -19,22 +19,20 @@ Recommended focus:
 
 `just-bash` advertises a broader shell language:
 
-- `elif`
 - functions
 - `local`
 - loops: `for`, `while`, `until`
 
 Recommended order:
 
-1. `elif`
-2. `while`
-3. `for`
-4. functions and `local`
-5. `until`
+1. `while`
+2. `for`
+3. functions and `local`
+4. `until`
 
 Rationale:
 
-- `elif` and `while` raise script usefulness faster than jumping straight to functions
+- `while` raises script usefulness faster than jumping straight to functions
 - functions and `local` should come after loop/control-flow semantics are stable
 
 ## Execution Semantics
@@ -161,9 +159,8 @@ Recommended order:
 
 If the goal is to move closer to `just-bash` with high payoff and controlled scope:
 
-1. `elif`
-2. `while`
-3. `grep` depth
-4. hard links in `ln`
-5. execution-state decision
-6. custom command registration
+1. `while`
+2. `grep` depth
+3. hard links in `ln`
+4. execution-state decision
+5. custom command registration

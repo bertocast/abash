@@ -412,19 +412,26 @@ impl Parser {
         let condition = self.parse_pipeline()?;
         self.expect_clause_separator("then")?;
         self.expect_keyword("then")?;
-        let then_steps = self.parse_steps_until(&["else", "fi"])?;
+        let then_steps = self.parse_steps_until(&["elif", "else", "fi"])?;
         if then_steps.is_empty() {
             return Err(SandboxError::InvalidRequest(
                 "if blocks require at least one command in the then branch".to_string(),
             ));
         }
 
-        let else_steps = if self.consume_keyword("else") {
-            self.parse_steps_until(&["fi"])?
+        let else_steps = if self.consume_keyword("elif") {
+            vec![ScriptStep {
+                op: None,
+                kind: StepKind::If(self.parse_if_block()?),
+            }]
+        } else if self.consume_keyword("else") {
+            let steps = self.parse_steps_until(&["fi"])?;
+            self.expect_keyword("fi")?;
+            steps
         } else {
+            self.expect_keyword("fi")?;
             Vec::new()
         };
-        self.expect_keyword("fi")?;
 
         Ok(IfBlock {
             condition,
@@ -849,6 +856,21 @@ mod tests {
         let StepKind::If(_) = &block.then_steps[0].kind else {
             panic!("expected nested if block");
         };
+    }
+
+    #[test]
+    fn parses_if_elif_else_blocks() {
+        let parsed =
+            parse_script("if false; then echo no; elif true; then echo yes; else echo later; fi")
+                .unwrap();
+        let StepKind::If(block) = &parsed[0].kind else {
+            panic!("expected if block");
+        };
+        let StepKind::If(elif_block) = &block.else_steps[0].kind else {
+            panic!("expected elif block");
+        };
+        assert_eq!(elif_block.then_steps.len(), 1);
+        assert_eq!(elif_block.else_steps.len(), 1);
     }
 }
 

@@ -209,6 +209,17 @@ async def test_script_mode_if_without_else_succeeds_when_condition_is_false() ->
 
 
 @pytest.mark.anyio
+async def test_script_mode_supports_if_elif_else_fi() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script(
+            "if false; then echo no; elif true; then echo yes; else echo later; fi"
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "yes\n"
+
+
+@pytest.mark.anyio
 async def test_argv_mode_text_builtins_support_stdin_and_exit_codes() -> None:
     async with Bash() as bash:
         grep_hit = await bash.exec(["grep", "beta"], stdin="alpha\nbeta\n")
