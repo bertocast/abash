@@ -79,6 +79,51 @@ where
             table.rows.reverse();
             Ok(text_result(format_csv(&table.headers, &table.rows)))
         }
+        XanCommand::Behead { input } => {
+            let table = read_table(cwd, input.as_deref(), stdin, &mut read_file)?;
+            Ok(text_result(format_rows(&table.rows)))
+        }
+        XanCommand::Cat { pad, inputs } => {
+            let tables = read_tables(cwd, &inputs, &mut read_file)?;
+            if tables.is_empty() {
+                return Err(SandboxError::InvalidRequest(
+                    "xan cat requires at least one input file".to_string(),
+                ));
+            }
+            let headers = if pad {
+                let mut merged = Vec::new();
+                for table in &tables {
+                    for header in &table.headers {
+                        if !merged.contains(header) {
+                            merged.push(header.clone());
+                        }
+                    }
+                }
+                merged
+            } else {
+                let first = tables[0].headers.clone();
+                for table in tables.iter().skip(1) {
+                    if table.headers != first {
+                        return Err(SandboxError::InvalidRequest(
+                            "xan cat headers do not match (use -p to pad)".to_string(),
+                        ));
+                    }
+                }
+                first
+            };
+            let mut rows = Vec::new();
+            for table in tables {
+                for row in table.rows {
+                    rows.push(
+                        headers
+                            .iter()
+                            .map(|header| column_value(&table.headers, &row, header))
+                            .collect::<Vec<_>>(),
+                    );
+                }
+            }
+            Ok(text_result(format_csv(&headers, &rows)))
+        }
         XanCommand::Select { spec, input } => {
             let table = read_table(cwd, input.as_deref(), stdin, &mut read_file)?;
             let columns = resolve_column_spec(&spec, &table.headers)?;
@@ -229,6 +274,54 @@ where
             });
             Ok(text_result(format_csv(&table.headers, &rows)))
         }
+        XanCommand::Dedup { select, input } => {
+            let table = read_table(cwd, input.as_deref(), stdin, &mut read_file)?;
+            let columns = match select {
+                Some(spec) => resolve_column_spec(&spec, &table.headers)?,
+                None => (0..table.headers.len()).collect(),
+            };
+            let mut seen = BTreeSet::new();
+            let rows = table
+                .rows
+                .into_iter()
+                .filter(|row| {
+                    let key = columns
+                        .iter()
+                        .map(|index| row[*index].clone())
+                        .collect::<Vec<_>>()
+                        .join("\u{1f}");
+                    seen.insert(key)
+                })
+                .collect::<Vec<_>>();
+            Ok(text_result(format_csv(&table.headers, &rows)))
+        }
+        XanCommand::Top {
+            select,
+            limit,
+            reverse,
+            input,
+        } => {
+            let table = read_table(cwd, input.as_deref(), stdin, &mut read_file)?;
+            let column = if let Some(spec) = select {
+                let columns = resolve_column_spec(&spec, &table.headers)?;
+                *columns.first().ok_or_else(|| {
+                    SandboxError::InvalidRequest("xan top requires at least one column".to_string())
+                })?
+            } else {
+                0
+            };
+            let mut rows = table.rows.clone();
+            rows.sort_by(|left, right| {
+                let ordering = parse_number(&left[column]).total_cmp(&parse_number(&right[column]));
+                if reverse {
+                    ordering
+                } else {
+                    ordering.reverse()
+                }
+            });
+            rows.truncate(limit);
+            Ok(text_result(format_csv(&table.headers, &rows)))
+        }
         XanCommand::Filter {
             expression,
             invert,
@@ -278,6 +371,13 @@ enum XanCommand {
     Reverse {
         input: Option<String>,
     },
+    Behead {
+        input: Option<String>,
+    },
+    Cat {
+        pad: bool,
+        inputs: Vec<String>,
+    },
     Select {
         spec: String,
         input: Option<String>,
@@ -305,6 +405,16 @@ enum XanCommand {
     Sort {
         select: Option<String>,
         numeric: bool,
+        reverse: bool,
+        input: Option<String>,
+    },
+    Dedup {
+        select: Option<String>,
+        input: Option<String>,
+    },
+    Top {
+        select: Option<String>,
+        limit: usize,
         reverse: bool,
         input: Option<String>,
     },
@@ -337,12 +447,16 @@ fn parse_command(args: &[String]) -> Result<XanCommand, SandboxError> {
         "tail" => parse_tail(&args[1..]),
         "slice" => parse_slice(&args[1..]),
         "reverse" => parse_reverse(&args[1..]),
+        "behead" => parse_behead(&args[1..]),
+        "cat" => parse_cat(&args[1..]),
         "select" => parse_select(&args[1..]),
         "drop" => parse_drop(&args[1..]),
         "rename" => parse_rename(&args[1..]),
         "enum" => parse_enum(&args[1..]),
         "search" => parse_search(&args[1..]),
         "sort" => parse_sort(&args[1..]),
+        "dedup" => parse_dedup(&args[1..]),
+        "top" => parse_top(&args[1..]),
         "filter" => parse_filter(&args[1..]),
         value => Err(SandboxError::InvalidRequest(format!(
             "xan subcommand is not supported: {value}"
@@ -526,6 +640,45 @@ fn parse_reverse(args: &[String]) -> Result<XanCommand, SandboxError> {
         }
     }
     Ok(XanCommand::Reverse { input })
+}
+
+fn parse_behead(args: &[String]) -> Result<XanCommand, SandboxError> {
+    let mut input = None;
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(XanCommand::Help),
+            _ if arg.starts_with('-') => {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "xan behead flag is not supported: {arg}"
+                )))
+            }
+            _ if input.is_none() => input = Some(arg.clone()),
+            _ => {
+                return Err(SandboxError::InvalidRequest(
+                    "xan behead accepts at most one input".to_string(),
+                ))
+            }
+        }
+    }
+    Ok(XanCommand::Behead { input })
+}
+
+fn parse_cat(args: &[String]) -> Result<XanCommand, SandboxError> {
+    let mut pad = false;
+    let mut inputs = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-p" | "--pad" => pad = true,
+            "--help" | "-h" => return Ok(XanCommand::Help),
+            _ if arg.starts_with('-') => {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "xan cat flag is not supported: {arg}"
+                )))
+            }
+            _ => inputs.push(arg.clone()),
+        }
+    }
+    Ok(XanCommand::Cat { pad, inputs })
 }
 
 fn parse_select(args: &[String]) -> Result<XanCommand, SandboxError> {
@@ -836,6 +989,95 @@ fn parse_filter(args: &[String]) -> Result<XanCommand, SandboxError> {
     })
 }
 
+fn parse_dedup(args: &[String]) -> Result<XanCommand, SandboxError> {
+    let mut select = None;
+    let mut input = None;
+    let mut index = 0usize;
+
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-s" | "--select" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(SandboxError::InvalidRequest(
+                        "xan dedup missing value for -s".to_string(),
+                    ));
+                };
+                select = Some(value.clone());
+                index += 2;
+            }
+            "--help" | "-h" => return Ok(XanCommand::Help),
+            _ if arg.starts_with('-') => {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "xan dedup flag is not supported: {arg}"
+                )))
+            }
+            _ if input.is_none() => {
+                input = Some(arg.clone());
+                index += 1;
+            }
+            _ => {
+                return Err(SandboxError::InvalidRequest(
+                    "xan dedup accepts at most one input".to_string(),
+                ))
+            }
+        }
+    }
+
+    Ok(XanCommand::Dedup { select, input })
+}
+
+fn parse_top(args: &[String]) -> Result<XanCommand, SandboxError> {
+    let mut select = None;
+    let mut limit = 10usize;
+    let mut reverse = false;
+    let mut input = None;
+    let mut index = 0usize;
+
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-l" | "-n" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(SandboxError::InvalidRequest(
+                        "xan top missing value for -l".to_string(),
+                    ));
+                };
+                limit = parse_usize_flag("xan top limit", value)?;
+                index += 2;
+            }
+            "-R" | "-r" | "--reverse" => {
+                reverse = true;
+                index += 1;
+            }
+            "--help" | "-h" => return Ok(XanCommand::Help),
+            _ if arg.starts_with('-') => {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "xan top flag is not supported: {arg}"
+                )))
+            }
+            _ if select.is_none() => {
+                select = Some(arg.clone());
+                index += 1;
+            }
+            _ if input.is_none() => {
+                input = Some(arg.clone());
+                index += 1;
+            }
+            _ => {
+                return Err(SandboxError::InvalidRequest(
+                    "xan top accepts one column and one input".to_string(),
+                ))
+            }
+        }
+    }
+
+    Ok(XanCommand::Top {
+        select,
+        limit,
+        reverse,
+        input,
+    })
+}
+
 fn help_text() -> String {
     [
         "xan - narrow CSV toolkit",
@@ -847,16 +1089,20 @@ fn help_text() -> String {
         "  xan tail [-n N] [FILE]",
         "  xan slice [-s START] [-e END] [-l LEN] [FILE]",
         "  xan reverse [FILE]",
+        "  xan behead [FILE]",
+        "  xan cat [-p] FILE...",
         "  xan select COLS [FILE]",
         "  xan drop COLS [FILE]",
         "  xan rename NAMES [-s COLS] [FILE]",
         "  xan enum [-c NAME] [FILE]",
         "  xan search [-s COLS] [-v] [-i] [-r] PATTERN [FILE]",
         "  xan sort [-s COL] [-N] [-R] [FILE]",
+        "  xan dedup [-s COLS] [FILE]",
+        "  xan top [COL] [-l N] [-R] [FILE]",
         "  xan filter [-v] [-l N] EXPR [FILE]",
         "",
         "Current scope:",
-        "  headers, count, head, tail, slice, reverse, select, drop, rename, enum, search, sort, filter",
+        "  headers, count, head, tail, slice, reverse, behead, cat, select, drop, rename, enum, search, sort, dedup, top, filter",
     ]
     .join("\n")
 }
@@ -886,6 +1132,20 @@ where
         SandboxError::InvalidRequest("xan currently requires UTF-8 CSV input".to_string())
     })?;
     parse_csv(&text)
+}
+
+fn read_tables<F>(
+    cwd: &str,
+    inputs: &[String],
+    read_file: &mut F,
+) -> Result<Vec<Table>, SandboxError>
+where
+    F: FnMut(&str) -> Result<Vec<u8>, SandboxError>,
+{
+    inputs
+        .iter()
+        .map(|input| read_table(cwd, Some(input), Vec::new(), read_file))
+        .collect()
 }
 
 fn parse_csv(input: &str) -> Result<Table, SandboxError> {
@@ -1002,6 +1262,31 @@ fn format_csv(headers: &[String], rows: &[Vec<String>]) -> Vec<u8> {
     }
 
     rendered.into_bytes()
+}
+
+fn format_rows(rows: &[Vec<String>]) -> Vec<u8> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let mut rendered = String::new();
+    for row in rows {
+        rendered.push_str(
+            &row.iter()
+                .map(|value| quote_csv_field(value))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        rendered.push('\n');
+    }
+    rendered.into_bytes()
+}
+
+fn column_value(headers: &[String], row: &[String], target: &str) -> String {
+    headers
+        .iter()
+        .position(|header| header == target)
+        .and_then(|index| row.get(index).cloned())
+        .unwrap_or_default()
 }
 
 fn quote_csv_field(value: &str) -> String {

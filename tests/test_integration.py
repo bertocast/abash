@@ -1080,6 +1080,37 @@ async def test_argv_mode_xan_head_tail_slice_reverse_and_column_ops() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_xan_behead_cat_dedup_and_top() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/a.csv", "name,score,team\nbert,10,a\nana,30,a\n")
+        await bash.write_file("/workspace/b.csv", "name,score,team\nzoe,20,b\nmia,30,b\n")
+        beheaded = await bash.exec(["xan", "behead", "/workspace/a.csv"])
+        catted = await bash.exec(["xan", "cat", "/workspace/a.csv", "/workspace/b.csv"])
+        deduped = await bash.exec(["xan", "dedup", "-s", "score", "/workspace/b.csv"])
+        top = await bash.exec(["xan", "top", "score", "-l", "2", "/workspace/a.csv"])
+
+    assert beheaded.exit_code == 0
+    assert beheaded.stdout == "bert,10,a\nana,30,a\n"
+    assert catted.exit_code == 0
+    assert catted.stdout == "name,score,team\nbert,10,a\nana,30,a\nzoe,20,b\nmia,30,b\n"
+    assert deduped.exit_code == 0
+    assert deduped.stdout == "name,score,team\nzoe,20,b\nmia,30,b\n"
+    assert top.exit_code == 0
+    assert top.stdout == "name,score,team\nana,30,a\nbert,10,a\n"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_xan_cat_supports_padded_headers() -> None:
+    async with Bash() as bash:
+        await bash.write_file("/workspace/a.csv", "name,score\nbert,10\n")
+        await bash.write_file("/workspace/b.csv", "name,team\nana,a\n")
+        result = await bash.exec(["xan", "cat", "-p", "/workspace/a.csv", "/workspace/b.csv"])
+
+    assert result.exit_code == 0
+    assert result.stdout == "name,score,team\nbert,10,\nana,,a\n"
+
+
+@pytest.mark.anyio
 async def test_script_mode_xan_preserves_column_globs() -> None:
     async with Bash() as bash:
         await bash.write_file(
