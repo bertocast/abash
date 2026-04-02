@@ -62,21 +62,21 @@ Many commands now exist by name in both projects, but `just-bash` is still broad
 
 Highest-priority work:
 
-- `xan`: aggregation/data-conversion subcommands beyond the current reshape plus `frequency`/`stats`/`agg` slice
 - `awk`: deeper control-flow/runtime surface beyond the current regex/`printf` plus array/`next` core
+- `xan`: later reshape/data-conversion subcommands beyond the current reshape plus `frequency`/`stats`/`agg`/`groupby` slice
 - `yq`: broader editing behavior beyond the current multi-file format-preserving `-i` core
 
 Recommended order:
 
-1. `xan`
-2. `awk`
+1. `awk`
+2. `xan`
 3. `yq`
 
 Rationale:
 
-- `grep`, `ln`, execution reset-mode, a broader `jq` slice with direct path assignment, YAML/JSON/TOML/CSV/INI/XML/front-matter `yq`, a broader `yq -i` with multi-file format-preserving rewrites, a second `xan` row-shaping wave (`behead`, `cat`, `dedup`, `top`), a third `xan` aggregation wave (`frequency`, `stats`, then narrow `agg`), and three `awk` lifts (`regex`/`printf`, associative-array reads and writes, then `delete`/`next`) are landed
+- `grep`, `ln`, execution reset-mode, a broader `jq` slice with direct path assignment, YAML/JSON/TOML/CSV/INI/XML/front-matter `yq`, a broader `yq -i` with multi-file format-preserving rewrites, a second `xan` row-shaping wave (`behead`, `cat`, `dedup`, `top`), a third `xan` aggregation wave (`frequency`, `stats`, narrow `agg`, then narrow `groupby`), and three `awk` lifts (`regex`/`printf`, associative-array reads and writes, then `delete`/`next`) are landed
 - `jq` and `yq` affect high-value agent data workflows
-- `xan` now has the clearest remaining data-workflow payoff via `groupby` or later reshape/data-conversion work; `awk` still wants array iteration and deeper control flow, while `yq` shifts from basic editing support to broader function/edit behavior
+- `awk` now has the clearest remaining behavior payoff via array iteration or broader control flow, while `xan` shifts to later reshape/data-conversion work and `yq` stays on broader function/edit behavior
 
 ## JavaScript Runtime
 

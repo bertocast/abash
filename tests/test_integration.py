@@ -1233,6 +1233,27 @@ async def test_argv_mode_xan_agg_supports_count_sum_and_mean() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_xan_groupby_supports_first_seen_groups() -> None:
+    async with Bash() as bash:
+        await bash.write_file(
+            "/workspace/data.csv",
+            "team,score\ncore,10\ngrowth,30\ncore,5\n",
+        )
+        result = await bash.exec(
+            [
+                "xan",
+                "groupby",
+                "team",
+                "count() as rows, sum(score) as total",
+                "/workspace/data.csv",
+            ]
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "team,rows,total\ncore,2,15\ngrowth,1,30\n"
+
+
+@pytest.mark.anyio
 async def test_script_mode_xan_preserves_column_globs() -> None:
     async with Bash() as bash:
         await bash.write_file(

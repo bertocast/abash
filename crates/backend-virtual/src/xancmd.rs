@@ -427,6 +427,49 @@ where
             let row = render_agg_row(&table.rows, &specs);
             Ok(text_result(format_csv(&headers, &[row])))
         }
+        XanCommand::Groupby {
+            groups,
+            expr,
+            input,
+        } => {
+            let table = read_table(cwd, input.as_deref(), stdin, &mut read_file)?;
+            let group_columns = resolve_column_spec(&groups, &table.headers)?;
+            let specs = parse_agg_specs(&expr, &table.headers)?;
+            let mut order = Vec::<String>::new();
+            let mut grouped = BTreeMap::<String, Vec<Vec<String>>>::new();
+
+            for row in &table.rows {
+                let key = group_columns
+                    .iter()
+                    .map(|index| row.get(*index).cloned().unwrap_or_default())
+                    .collect::<Vec<_>>()
+                    .join("\u{1f}");
+                if !grouped.contains_key(&key) {
+                    order.push(key.clone());
+                }
+                grouped.entry(key).or_default().push(row.clone());
+            }
+
+            let mut headers = group_columns
+                .iter()
+                .map(|index| table.headers[*index].clone())
+                .collect::<Vec<_>>();
+            headers.extend(specs.iter().map(|spec| spec.alias.clone()));
+
+            let mut rows = Vec::new();
+            for key in order {
+                if let Some(group_rows) = grouped.get(&key) {
+                    let mut row = group_columns
+                        .iter()
+                        .map(|index| group_rows[0].get(*index).cloned().unwrap_or_default())
+                        .collect::<Vec<_>>();
+                    row.extend(render_agg_row(group_rows, &specs));
+                    rows.push(row);
+                }
+            }
+
+            Ok(text_result(format_csv(&headers, &rows)))
+        }
         XanCommand::Filter {
             expression,
             invert,
@@ -538,6 +581,11 @@ enum XanCommand {
         expr: String,
         input: Option<String>,
     },
+    Groupby {
+        groups: String,
+        expr: String,
+        input: Option<String>,
+    },
     Filter {
         expression: String,
         invert: bool,
@@ -580,6 +628,7 @@ fn parse_command(args: &[String]) -> Result<XanCommand, SandboxError> {
         "frequency" | "freq" => parse_frequency(&args[1..]),
         "stats" => parse_stats(&args[1..]),
         "agg" => parse_agg(&args[1..]),
+        "groupby" => parse_groupby(&args[1..]),
         "filter" => parse_filter(&args[1..]),
         value => Err(SandboxError::InvalidRequest(format!(
             "xan subcommand is not supported: {value}"
@@ -1338,6 +1387,45 @@ fn parse_agg(args: &[String]) -> Result<XanCommand, SandboxError> {
     Ok(XanCommand::Agg { expr, input })
 }
 
+fn parse_groupby(args: &[String]) -> Result<XanCommand, SandboxError> {
+    let mut groups = None;
+    let mut expr = None;
+    let mut input = None;
+
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(XanCommand::Help),
+            "--sorted" => {}
+            _ if arg.starts_with('-') => {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "xan groupby flag is not supported: {arg}"
+                )))
+            }
+            _ if groups.is_none() => groups = Some(arg.clone()),
+            _ if expr.is_none() => expr = Some(arg.clone()),
+            _ if input.is_none() => input = Some(arg.clone()),
+            _ => {
+                return Err(SandboxError::InvalidRequest(
+                    "xan groupby accepts group columns, one expression, and at most one input"
+                        .to_string(),
+                ))
+            }
+        }
+    }
+
+    let groups = groups.ok_or_else(|| {
+        SandboxError::InvalidRequest("xan groupby requires group columns".to_string())
+    })?;
+    let expr = expr.ok_or_else(|| {
+        SandboxError::InvalidRequest("xan groupby requires an aggregation expression".to_string())
+    })?;
+    Ok(XanCommand::Groupby {
+        groups,
+        expr,
+        input,
+    })
+}
+
 fn help_text() -> String {
     [
         "xan - narrow CSV toolkit",
@@ -1362,10 +1450,11 @@ fn help_text() -> String {
         "  xan frequency [-s COLS] [-g COL] [-l N] [--no-extra] [FILE]",
         "  xan stats [-s COLS] [FILE]",
         "  xan agg EXPR [FILE]",
+        "  xan groupby COLS EXPR [FILE]",
         "  xan filter [-v] [-l N] EXPR [FILE]",
         "",
         "Current scope:",
-        "  headers, count, head, tail, slice, reverse, behead, cat, select, drop, rename, enum, search, sort, dedup, top, frequency, stats, agg, filter",
+        "  headers, count, head, tail, slice, reverse, behead, cat, select, drop, rename, enum, search, sort, dedup, top, frequency, stats, agg, groupby, filter",
     ]
     .join("\n")
 }
@@ -2192,5 +2281,28 @@ mod tests {
             &specs,
         );
         assert_eq!(row, vec!["3", "70", "23.333333333333332"]);
+    }
+
+    #[test]
+    fn parse_groupby_accepts_sorted_flag() {
+        let command = parse_groupby(&[
+            "--sorted".to_string(),
+            "team".to_string(),
+            "sum(score) as total".to_string(),
+            "/tmp/data.csv".to_string(),
+        ])
+        .unwrap();
+        match command {
+            XanCommand::Groupby {
+                groups,
+                expr,
+                input,
+            } => {
+                assert_eq!(groups, "team");
+                assert_eq!(expr, "sum(score) as total");
+                assert_eq!(input.as_deref(), Some("/tmp/data.csv"));
+            }
+            _ => panic!("expected groupby command"),
+        }
     }
 }
