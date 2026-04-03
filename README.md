@@ -34,9 +34,9 @@ The current implementation provides:
 - host-side embedding APIs for reading, writing, creating, and checking sandbox files
 - workspace-aware filesystem policy for `memory`, `host_readonly`, `host_cow`, and `host_readwrite`
 - in-process detached execution through `Bash.exec_detached()`
-- buffered `BashRun` inspection for status, wait, cancel, stdout/stderr/output, and retained events
-- buffered session audit records plus optional event/audit callbacks
-- argv-mode custom command registration plus top-level pre/post execution hooks
+- live `BashRun.stream_events()` / `stream_output()` plus retained status, wait, cancel, stdout/stderr/output, and event history
+- retained session run summaries, run-event history, audit records, and optional event/audit callbacks
+- host-side custom command registration for argv mode and script-internal dispatch, plus optional `CustomCommandContext` metadata and delegated nested execution
 - script execution through `Bash.exec_script()` and `Bash.exec_detached_script()`, including optional script `argv`
 - safe shell composition for `|`, `<`, `>`, `>>`, `;`, `&&`, and `||`
 
@@ -54,7 +54,7 @@ Implemented today on the virtual backend:
 Most commands are intentionally partial implementations. `abash` aims for safe, useful workflows first, not full GNU/bash parity.
 Recent behavior lifts: `grep` now supports regex search plus narrow `-E`, `-F`, `-i`, `-n`, `-v`, `-c`, `-l`, and `-r`; `ln` now creates hard links by default and still supports `-s` for symlinks; `jq` now supports literals, binary ops, `select`, `map`, `length`, `type`, `keys`, `has`, array/object construction, and direct path assignment; `yq` now carries that jq-lite surface across YAML/JSON/TOML/CSV/INI/XML, plus front-matter extraction and broader `-i` rewrites that preserve source format across multiple files; `xan` now covers row/column operations like `head`, `tail`, `slice`, `reverse`, `behead`, `cat`, `drop`, `rename`, `enum`, `dedup`, `top`, `frequency`, `stats`, `agg`, and narrow `groupby`; `awk` now supports `BEGIN`/`END`, `-v`, variables, scalar and array assignments, statement-level `if/else`, `delete`, `next`, arithmetic, regex literals, `printf`, and basic comparisons.
 
-Command-name parity history is tracked in [docs/pending_commands.md](docs/pending_commands.md). The closed comparison pass and its final decisions are tracked in [docs/roadmap.md](docs/roadmap.md).
+Command-name parity history is tracked in [docs/pending_commands.md](docs/pending_commands.md). The current product roadmap is tracked in [docs/roadmap.md](docs/roadmap.md).
 
 ## Filesystem Modes
 
@@ -84,18 +84,19 @@ Command-name parity history is tracked in [docs/pending_commands.md](docs/pendin
 
 ## Detached Execution
 
-- `Bash.exec_detached()` starts one in-process background run owned by the current `Bash` session.
+- `Bash.exec_detached()` starts an in-process background run owned by the current `Bash` session.
 - `BashRun.wait()` returns the same structured `ExecutionResult` shape as `Bash.exec()`.
-- `BashRun.events()` returns buffered lifecycle/output events after or during the run.
-- `Bash.audit_events()` returns buffered sanitized audit records for session and policy activity.
-- Output is buffered; there is no live streaming guarantee in Phase 4 v1.
-- Only one active run is allowed per `Bash` session.
+- `BashRun.events()` returns retained lifecycle/output events, and `BashRun.stream_events()` / `stream_output()` expose live event delivery while a run is active.
+- `Bash.run_events()`, `Bash.runs()`, and `Bash.audit_events()` expose retained session-level runtime history.
+- Multiple detached runs can be created per session; stateful execution still serializes through the session lock, so queued runs wait their turn.
+- Output-producing builtins still emit stdout/stderr as buffered event chunks rather than byte-streamed process pipes.
 - `Bash(session_state="per_exec")` opts into `just-bash`-style shell-state reset between calls while keeping the filesystem shared.
 - `replace_env=True` opts one call into request-env-only execution without clearing persisted shell state globally.
 
 ## Extension Surface
 
 - `Bash(custom_commands={...})` registers host-side commands that can run in argv mode or inside script-mode pipelines and redirections.
+- Custom command callbacks can accept a second `CustomCommandContext` argument with run/session/runtime metadata plus `exec()` / `exec_script()` delegation helpers.
 - `pre_exec_hook` can rewrite top-level requests before dispatch.
 - `post_exec_hook` can observe or replace top-level results after dispatch.
 - Hooks remain intentionally narrow; they operate on the top-level request/result boundary, not on the internal script AST.
@@ -115,8 +116,8 @@ Command-name parity history is tracked in [docs/pending_commands.md](docs/pendin
 - multi-mount filesystem composition is not part of the current product line
 - unrestricted network access remains unavailable by design
 - detached runs are in-process only and do not survive interpreter or process restart
-- output and event retrieval are buffered snapshots, not live streaming logs
-- only one active run is allowed per `Bash` session
+- stdout/stderr are still surfaced as buffered event chunks rather than byte-streamed process pipes
+- detached runs can queue, but shell mutation still serializes through one session lock
 - script compatibility is intentionally narrow and not full bash parity
 - the `nsjail` backend is reserved for later Linux integration and currently returns explicit unsupported errors
 

@@ -9,9 +9,9 @@
 - host-side file helpers are embedding APIs and are not intended to replace shell-first agent workflows
 - network remains zero-trust by default; `curl` only works with explicit network policy plus per-exec `network_enabled=True`
 - detached runs are in-process only and are lost if the embedding interpreter exits
-- only one active run is allowed per `Bash` session
-- run events and output accessors are buffered snapshots; there is no live streaming log API yet
-- custom commands can run inside script dispatch now, but hooks still only apply at the top-level request boundary; AST rewrite plugins and richer custom-command context objects are still out of scope
+- multiple detached runs can be created per `Bash` session, but execution still serializes through one session lock to preserve stateful shell semantics
+- `BashRun.stream_events()` and `stream_output()` are live at the run-event level, but stdout/stderr are still emitted as buffered chunks rather than byte-streamed process pipes
+- custom commands can run inside script dispatch, can receive `CustomCommandContext`, and can delegate one nested `exec()` / `exec_script()` request, but top-level hooks still only apply at the outer request boundary and AST rewrite plugins are still out of scope
 - pipeline execution is buffered and sequential rather than streaming or process-concurrent
 - shell state defaults to session-persistent behavior; `session_state="per_exec"` resets `cwd`, exported env, aliases, and history between calls, but filesystem contents remain shared
 - `replace_env=True` only affects the current request's env merge; it does not undo persisted `export` state for later calls

@@ -54,8 +54,8 @@ mod yq;
 
 use abash_core::{
     create_filesystem, resolve_sandbox_path, ExecutionMode, ExecutionRequest, ExecutionResult,
-    FilesystemMode, SandboxConfig, SandboxError, SandboxExtensions, SandboxFilesystem,
-    SessionBackend, SessionState, TerminationReason,
+    ExtensionCommandResult, FilesystemMode, SandboxConfig, SandboxError, SandboxExtensions,
+    SandboxFilesystem, SessionBackend, SessionState, TerminationReason,
 };
 use script::{
     is_valid_assignment_name, parse_script, ChainOp, ForBlock, FunctionDef, IfBlock, Pipeline,
@@ -871,24 +871,62 @@ impl VirtualSession {
                 filesystem_mode: config.filesystem_mode.clone(),
                 metadata: metadata.clone(),
             };
-            if let Some(mut result) = extensions.exec_custom_command(&custom_request)? {
-                result
-                    .metadata
-                    .entry("backend".to_string())
-                    .or_insert_with(|| "custom".to_string());
-                result
-                    .metadata
-                    .entry("command".to_string())
-                    .or_insert_with(|| command.clone());
-                result
-                    .metadata
-                    .entry("cwd".to_string())
-                    .or_insert_with(|| cwd.to_string());
-                result
-                    .metadata
-                    .entry("filesystem_mode".to_string())
-                    .or_insert_with(|| config.filesystem_mode.as_str().to_string());
-                return Ok(result);
+            if let Some(extension_result) = extensions.exec_custom_command(&custom_request)? {
+                match extension_result {
+                    ExtensionCommandResult::Completed(mut result) => {
+                        result
+                            .metadata
+                            .entry("backend".to_string())
+                            .or_insert_with(|| "custom".to_string());
+                        result
+                            .metadata
+                            .entry("command".to_string())
+                            .or_insert_with(|| command.clone());
+                        result
+                            .metadata
+                            .entry("cwd".to_string())
+                            .or_insert_with(|| cwd.to_string());
+                        result
+                            .metadata
+                            .entry("filesystem_mode".to_string())
+                            .or_insert_with(|| config.filesystem_mode.as_str().to_string());
+                        return Ok(result);
+                    }
+                    ExtensionCommandResult::Delegate(mut delegated_request) => {
+                        if delegated_request.cwd.is_empty() {
+                            delegated_request.cwd = cwd.to_string();
+                        }
+                        if delegated_request.filesystem_mode != config.filesystem_mode {
+                            delegated_request.filesystem_mode = config.filesystem_mode.clone();
+                        }
+                        if delegated_request.metadata.is_empty() {
+                            delegated_request.metadata = metadata.clone();
+                        } else {
+                            for (key, value) in &metadata {
+                                delegated_request
+                                    .metadata
+                                    .entry(key.clone())
+                                    .or_insert_with(|| value.clone());
+                            }
+                        }
+                        return match delegated_request.mode {
+                            ExecutionMode::Argv => self.run_argv(
+                                runtime,
+                                delegated_request,
+                                config,
+                                cancel_flag,
+                                Some(extensions),
+                            ),
+                            ExecutionMode::Script => self.run_script(
+                                runtime,
+                                delegated_request,
+                                config,
+                                cancel_flag,
+                                Some(extensions),
+                            ),
+                        };
+                    }
+                }
             }
         }
 

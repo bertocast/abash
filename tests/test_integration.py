@@ -14,6 +14,8 @@ import pytest
 from abash import (
     AuditEvent,
     Bash,
+    CustomCommandContext,
+    DelegatedExecution,
     ExecutionRequest,
     RunEvent,
     ErrorKind,
@@ -2017,18 +2019,18 @@ async def test_detached_cancelled_run_has_stable_terminal_state() -> None:
 
 
 @pytest.mark.anyio
-async def test_active_run_blocks_second_exec_and_file_helpers() -> None:
+async def test_multiple_detached_runs_queue_and_complete() -> None:
     async with Bash() as bash:
-        run = await bash.exec_detached(["sleep", "0.25"], timeout_ms=1_000)
+        first = await bash.exec_detached(["sleep", "0.05"], timeout_ms=1_000)
+        second = await bash.exec_detached(["echo", "queued"])
 
-        with pytest.raises(ValueError):
-            await bash.exec_detached(["echo", "nope"])
+        first_result = await first.wait()
+        second_result = await second.wait()
+        summaries = await bash.runs()
 
-        with pytest.raises(ValueError):
-            await bash.exists("/workspace/demo.txt")
-
-        run.cancel()
-        await run.wait()
+    assert first_result.exit_code == 0
+    assert second_result.stdout == "queued\n"
+    assert {summary.run_id for summary in summaries} == {first.run_id, second.run_id}
 
 
 @pytest.mark.anyio
@@ -2041,6 +2043,44 @@ async def test_close_fails_while_active_run_exists() -> None:
 
         run.cancel()
         await run.wait()
+
+
+@pytest.mark.anyio
+async def test_run_specific_cancel_does_not_cancel_queued_peer() -> None:
+    async with Bash() as bash:
+        first = await bash.exec_detached(["sleep", "0.05"], timeout_ms=1_000)
+        second = await bash.exec_detached(["sleep", "1.0"], timeout_ms=2_000)
+        second.cancel()
+        first_result = await first.wait()
+        second_result = await second.wait()
+
+    assert first_result.exit_code == 0
+    assert second_result.error is not None
+    assert second_result.error.kind is ErrorKind.CANCELLATION
+
+
+@pytest.mark.anyio
+async def test_run_stream_events_yields_live_lifecycle() -> None:
+    async with Bash() as bash:
+        run = await bash.exec_detached(["sleep", "0.05"], timeout_ms=1_000)
+        seen: list[str] = []
+        async for event in run.stream_events(timeout_ms=10):
+            seen.append(event.kind)
+
+    assert seen[0] == "run_started"
+    assert seen[-1] == "run_completed"
+
+
+@pytest.mark.anyio
+async def test_session_run_events_and_summaries_are_retained() -> None:
+    async with Bash() as bash:
+        run = await bash.exec_detached(["echo", "summary-check"])
+        await run.wait()
+        events = await bash.run_events()
+        summaries = await bash.runs()
+
+    assert any(event.run_id == run.run_id and event.kind == "run_completed" for event in events)
+    assert any(summary.run_id == run.run_id and summary.status is RunStatus.COMPLETED for summary in summaries)
 
 
 @pytest.mark.anyio
@@ -2064,6 +2104,28 @@ async def test_custom_commands_support_exec_and_detached_runs() -> None:
     assert direct.metadata["custom_command"] == "upper"
     assert detached.stdout == "ANA\n"
     assert detached.metadata["backend"] == "custom"
+
+
+@pytest.mark.anyio
+async def test_custom_commands_receive_context_and_can_delegate_execution() -> None:
+    observed: dict[str, str] = {}
+
+    def show_note(request: ExecutionRequest, context: CustomCommandContext) -> DelegatedExecution:
+        observed["command_name"] = context.command_name
+        observed["backend"] = context.backend or ""
+        observed["run_id"] = context.run_id or ""
+        observed["session_id"] = context.session_id or ""
+        return context.exec(["cat", "/workspace/note.txt"])
+
+    async with Bash(custom_commands={"show-note": show_note}) as bash:
+        await bash.write_file("/workspace/note.txt", "delegated")
+        result = await bash.exec(["show-note"])
+
+    assert result.stdout == "delegated"
+    assert observed["command_name"] == "show-note"
+    assert observed["backend"]
+    assert observed["run_id"]
+    assert observed["session_id"]
 
 
 @pytest.mark.anyio

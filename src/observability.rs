@@ -97,3 +97,12 @@ pub struct AuditEvent {
     pub filesystem_mode: String,
     pub reason: Option<String>,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunSummary {
+    pub run_id: String,
+    pub started_at_ms: u64,
+    pub status: RunStatus,
+    pub exit_code: Option<i32>,
+    pub termination_reason: Option<String>,
+}

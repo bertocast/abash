@@ -138,7 +138,11 @@ class BashOptions:
     event_callback: Callable[["RunEvent"], None] | None = None
     audit_callback: Callable[["AuditEvent"], None] | None = None
     custom_commands: dict[
-        str, Callable[["ExecutionRequest"], "ExecutionResult | str | bytes"]
+        str,
+        Callable[
+            ...,
+            "ExecutionResult | str | bytes | DelegatedExecution",
+        ],
     ] = field(default_factory=dict)
     lazy_file_providers: dict[str, Callable[[str], str | bytes | None]] = field(
         default_factory=dict
@@ -147,6 +151,81 @@ class BashOptions:
     post_exec_hook: Callable[
         ["ExecutionRequest", "ExecutionResult"], "ExecutionResult | None"
     ] | None = None
+
+
+@dataclass(slots=True)
+class DelegatedExecution:
+    request: ExecutionRequest
+
+
+@dataclass(slots=True)
+class CustomCommandContext:
+    session_id: str | None
+    run_id: str | None
+    backend: str | None
+    profile: ExecutionProfile | None
+    filesystem_mode: FilesystemMode | None
+    request_mode: ExecutionMode
+    command_name: str
+    cwd: str = ""
+
+    def exec(
+        self,
+        argv: list[str],
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        replace_env: bool = False,
+        stdin: bytes | str | None = None,
+        timeout_ms: int | None = None,
+        metadata: dict[str, str] | None = None,
+        network_enabled: bool = False,
+        filesystem_mode: FilesystemMode | None = None,
+    ) -> DelegatedExecution:
+        return DelegatedExecution(
+            ExecutionRequest(
+                mode=ExecutionMode.ARGV,
+                argv=list(argv),
+                cwd=cwd or self.cwd,
+                env=dict(env or {}),
+                replace_env=replace_env,
+                stdin=stdin,
+                timeout_ms=timeout_ms,
+                metadata=dict(metadata or {}),
+                network_enabled=network_enabled,
+                filesystem_mode=filesystem_mode or self.filesystem_mode,
+            )
+        )
+
+    def exec_script(
+        self,
+        script: str,
+        *,
+        argv: list[str] | None = None,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        replace_env: bool = False,
+        stdin: bytes | str | None = None,
+        timeout_ms: int | None = None,
+        metadata: dict[str, str] | None = None,
+        network_enabled: bool = False,
+        filesystem_mode: FilesystemMode | None = None,
+    ) -> DelegatedExecution:
+        return DelegatedExecution(
+            ExecutionRequest(
+                mode=ExecutionMode.SCRIPT,
+                argv=list(argv or []),
+                script=script,
+                cwd=cwd or self.cwd,
+                env=dict(env or {}),
+                replace_env=replace_env,
+                stdin=stdin,
+                timeout_ms=timeout_ms,
+                metadata=dict(metadata or {}),
+                network_enabled=network_enabled,
+                filesystem_mode=filesystem_mode or self.filesystem_mode,
+            )
+        )
 
 
 @dataclass(slots=True)
@@ -174,3 +253,12 @@ class AuditEvent:
     profile: ExecutionProfile | None
     filesystem_mode: FilesystemMode | None
     reason: str | None = None
+
+
+@dataclass(slots=True)
+class RunSummary:
+    run_id: str
+    started_at: datetime
+    status: RunStatus
+    exit_code: int | None = None
+    termination_reason: TerminationReason | None = None

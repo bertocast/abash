@@ -28,4 +28,4 @@ Published `just-bash` command-name parity is complete in `abash`.
 ## Notes
 
 - command-name parity is complete
-- the comparison-based parity pass is also complete; see [docs/roadmap.md](/Users/alberto/repos/abash/docs/roadmap.md) for the final decisions from that work
+- published parity work is complete; see [docs/roadmap.md](/Users/alberto/repos/abash/docs/roadmap.md) for the current product roadmap

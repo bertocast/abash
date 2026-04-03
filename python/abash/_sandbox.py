@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from inspect import Parameter, signature
 from collections.abc import Callable, Iterable
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -11,6 +12,8 @@ from anyio import to_thread
 from ._models import (
     AuditEvent,
     BashOptions,
+    CustomCommandContext,
+    DelegatedExecution,
     ErrorKind,
     ExecutionMode,
     ExecutionProfile,
@@ -20,6 +23,7 @@ from ._models import (
     HostMount,
     NetworkPolicy,
     RunEvent,
+    RunSummary,
     RunStatus,
     SanitizedError,
     SessionState,
@@ -86,6 +90,14 @@ class _NativeRequestPayload(TypedDict):
     metadata: dict[str, str]
 
 
+class _NativeRunSummaryPayload(TypedDict):
+    run_id: str
+    started_at_ms: int
+    status: str
+    exit_code: int | None
+    termination_reason: str | None
+
+
 def _timestamp_from_ms(timestamp_ms: int) -> datetime:
     return datetime.fromtimestamp(timestamp_ms / 1_000, tz=UTC)
 
@@ -113,6 +125,15 @@ def _maybe_termination_reason(value: str | None) -> TerminationReason | None:
         return None
     try:
         return TerminationReason(value)
+    except ValueError:
+        return None
+
+
+def _maybe_mode(value: str | None) -> ExecutionMode | None:
+    if value is None:
+        return None
+    try:
+        return ExecutionMode(value)
     except ValueError:
         return None
 
@@ -185,6 +206,22 @@ def _result_to_payload(result: ExecutionResult | str | bytes) -> dict[str, objec
     }
 
 
+def _request_to_payload(request: ExecutionRequest) -> dict[str, object]:
+    return {
+        "mode": request.mode.value,
+        "argv": list(request.argv or []),
+        "script": request.script,
+        "cwd": request.cwd or "",
+        "env": dict(request.env),
+        "replace_env": request.replace_env,
+        "stdin": request.stdin_bytes() or b"",
+        "timeout_ms": request.timeout_ms,
+        "network_enabled": request.network_enabled,
+        "filesystem_mode": (request.filesystem_mode or FilesystemMode.MEMORY).value,
+        "metadata": dict(request.metadata),
+    }
+
+
 def _coerce_run_event(payload: dict[str, object]) -> RunEvent:
     typed_payload = cast(_NativeRunEventPayload, payload)
     return RunEvent(
@@ -213,6 +250,31 @@ def _coerce_audit_event(payload: dict[str, object]) -> AuditEvent:
         profile=_maybe_profile(typed_payload.get("profile")),
         filesystem_mode=_maybe_filesystem_mode(typed_payload.get("filesystem_mode")),
         reason=typed_payload.get("reason"),
+    )
+
+
+def _coerce_run_summary(payload: dict[str, object]) -> RunSummary:
+    typed_payload = cast(_NativeRunSummaryPayload, payload)
+    return RunSummary(
+        run_id=str(typed_payload["run_id"]),
+        started_at=_timestamp_from_ms(int(typed_payload["started_at_ms"])),
+        status=RunStatus(str(typed_payload["status"])),
+        exit_code=typed_payload.get("exit_code"),
+        termination_reason=_maybe_termination_reason(typed_payload.get("termination_reason")),
+    )
+
+
+def _command_context_from_request(request: ExecutionRequest) -> CustomCommandContext:
+    metadata = request.metadata
+    return CustomCommandContext(
+        session_id=metadata.get("session_id"),
+        run_id=metadata.get("run_id"),
+        backend=metadata.get("backend"),
+        profile=_maybe_profile(metadata.get("profile")),
+        filesystem_mode=_maybe_filesystem_mode(metadata.get("filesystem_mode")),
+        request_mode=_maybe_mode(metadata.get("request_mode")) or request.mode,
+        command_name=request.argv[0] if request.argv else "",
+        cwd=request.cwd,
     )
 
 
@@ -282,16 +344,33 @@ def _wrap_audit_callback(
 
 
 def _wrap_custom_command_callback(
-    callbacks: dict[str, Callable[[ExecutionRequest], ExecutionResult | str | bytes]] | None,
+    callbacks: dict[str, Callable[..., ExecutionResult | str | bytes | DelegatedExecution]]
+    | None,
 ) -> Callable[[dict[str, object]], dict[str, object]] | None:
     if not callbacks:
         return None
+
+    accepts_context: dict[str, bool] = {}
+    for name, callback in callbacks.items():
+        positional = [
+            parameter
+            for parameter in signature(callback).parameters.values()
+            if parameter.kind
+            in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        accepts_context[name] = len(positional) >= 2
 
     def _bridge(payload: dict[str, object]) -> dict[str, object]:
         request = _coerce_request(payload)
         command = request.argv[0] if request.argv else ""
         callback = callbacks[command]
-        return _result_to_payload(callback(request))
+        if accepts_context.get(command, False):
+            result = callback(request, _command_context_from_request(request))
+        else:
+            result = callback(request)
+        if isinstance(result, DelegatedExecution):
+            return {"delegated_request": _request_to_payload(result.request)}
+        return _result_to_payload(result)
 
     return _bridge
 
@@ -398,6 +477,39 @@ class BashRun:
     def audit_events(self) -> list[AuditEvent]:
         return [_coerce_audit_event(payload) for payload in self._native.audit_events()]
 
+    async def stream_events(self, *, timeout_ms: int = 100):
+        sequence = 0
+        while True:
+            payloads = await to_thread.run_sync(
+                self._native.wait_for_events,
+                sequence,
+                timeout_ms,
+            )
+            events = [_coerce_run_event(payload) for payload in payloads]
+            for event in events:
+                sequence = max(sequence, event.sequence)
+                yield event
+            if self.status() in {
+                RunStatus.COMPLETED,
+                RunStatus.CANCELLED,
+                RunStatus.FAILED,
+            } and not events:
+                final_events = [event for event in self.events() if event.sequence > sequence]
+                for event in final_events:
+                    sequence = max(sequence, event.sequence)
+                    yield event
+                break
+
+    async def stream_output(
+        self,
+        *,
+        timeout_ms: int = 100,
+        streams: tuple[str, ...] = ("stdout", "stderr"),
+    ):
+        async for event in self.stream_events(timeout_ms=timeout_ms):
+            if event.stream in streams and event.text:
+                yield event.stream, event.text
+
 
 class Bash:
     def __init__(
@@ -414,7 +526,8 @@ class Bash:
         event_callback: Callable[[RunEvent], None] | None = None,
         audit_callback: Callable[[AuditEvent], None] | None = None,
         custom_commands: dict[
-            str, Callable[[ExecutionRequest], ExecutionResult | str | bytes]
+            str,
+            Callable[..., ExecutionResult | str | bytes | DelegatedExecution],
         ]
         | None = None,
         lazy_file_providers: dict[str, Callable[[str], str | bytes | None]] | None = None,
@@ -499,7 +612,8 @@ class Bash:
         event_callback: Callable[[RunEvent], None] | None = None,
         audit_callback: Callable[[AuditEvent], None] | None = None,
         custom_commands: dict[
-            str, Callable[[ExecutionRequest], ExecutionResult | str | bytes]
+            str,
+            Callable[..., ExecutionResult | str | bytes | DelegatedExecution],
         ]
         | None = None,
         lazy_file_providers: dict[str, Callable[[str], str | bytes | None]] | None = None,
@@ -712,6 +826,18 @@ class Bash:
             raise RuntimeError("Bash session is closed")
         payloads = await to_thread.run_sync(self._native.audit_events)
         return [_coerce_audit_event(payload) for payload in payloads]
+
+    async def run_events(self) -> list[RunEvent]:
+        if self._closed:
+            raise RuntimeError("Bash session is closed")
+        payloads = await to_thread.run_sync(self._native.run_events)
+        return [_coerce_run_event(payload) for payload in payloads]
+
+    async def runs(self) -> list[RunSummary]:
+        if self._closed:
+            raise RuntimeError("Bash session is closed")
+        payloads = await to_thread.run_sync(self._native.runs)
+        return [_coerce_run_summary(payload) for payload in payloads]
 
     async def close(self) -> None:
         if self._closed:

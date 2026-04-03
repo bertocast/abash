@@ -317,11 +317,17 @@ pub trait SessionBackend: Send {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtensionCommandResult {
+    Completed(ExecutionResult),
+    Delegate(ExecutionRequest),
+}
+
 pub trait SandboxExtensions: Send + Sync {
     fn exec_custom_command(
         &self,
         _request: &ExecutionRequest,
-    ) -> Result<Option<ExecutionResult>, SandboxError> {
+    ) -> Result<Option<ExtensionCommandResult>, SandboxError> {
         Ok(None)
     }
 
@@ -355,16 +361,23 @@ impl SandboxSession {
     }
 
     pub fn run(&mut self, request: ExecutionRequest) -> ExecutionResult {
+        let cancel_flag = self.cancel_flag.clone();
+        self.run_with_cancel(request, cancel_flag.as_ref())
+    }
+
+    pub fn run_with_cancel(
+        &mut self,
+        request: ExecutionRequest,
+        cancel_flag: &AtomicBool,
+    ) -> ExecutionResult {
         if self.closed {
             return ExecutionResult::failure(SandboxError::ClosedSession, self.base_metadata());
         }
 
-        match self.backend.run(
-            request,
-            &self.config,
-            self.cancel_flag.as_ref(),
-            self.extensions.clone(),
-        ) {
+        match self
+            .backend
+            .run(request, &self.config, cancel_flag, self.extensions.clone())
+        {
             Ok(result) => result,
             Err(error) => ExecutionResult::failure(error, self.base_metadata()),
         }

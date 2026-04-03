@@ -15,7 +15,7 @@ use pyo3::types::{PyBytes, PyDict, PyList};
 mod observability;
 mod runtime;
 
-use observability::{AuditEvent, RunEvent};
+use observability::{AuditEvent, RunEvent, RunSummary};
 use runtime::{PythonExtensions, RunState, RuntimeCallbacks, SandboxRuntime};
 
 #[pyclass(module = "abash._native")]
@@ -25,7 +25,6 @@ struct NativeSandbox {
 
 #[pyclass(module = "abash._native")]
 struct NativeRun {
-    runtime: Arc<SandboxRuntime>,
     state: Arc<RunState>,
 }
 
@@ -131,7 +130,6 @@ impl NativeSandbox {
         )));
         let runtime = Arc::new(SandboxRuntime::new(
             session,
-            cancel_flag,
             RuntimeCallbacks {
                 event_callback: event_callback.map(Arc::new),
                 audit_callback: audit_callback.map(Arc::new),
@@ -216,13 +214,7 @@ impl NativeSandbox {
         let run = py
             .allow_threads(move || runtime.exec_detached(request))
             .map_err(to_py_err)?;
-        Py::new(
-            py,
-            NativeRun {
-                runtime: self.runtime.clone(),
-                state: run,
-            },
-        )
+        Py::new(py, NativeRun { state: run })
     }
 
     fn read_file(&self, py: Python<'_>, path: String) -> PyResult<Py<PyAny>> {
@@ -260,11 +252,19 @@ impl NativeSandbox {
     }
 
     fn cancel(&self) {
-        self.runtime.cancel_active();
+        self.runtime.cancel_all_runs();
     }
 
     fn audit_events(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         audit_events_to_python(py, &self.runtime.audit_events())
+    }
+
+    fn run_events(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        run_events_to_python(py, &self.runtime.run_events())
+    }
+
+    fn runs(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        run_summaries_to_python(py, &self.runtime.run_summaries())
     }
 
     fn close(&self, py: Python<'_>) -> PyResult<()> {
@@ -296,7 +296,7 @@ impl NativeRun {
     }
 
     fn cancel(&self) {
-        self.runtime.cancel_active();
+        self.state.cancel();
     }
 
     fn stdout(&self) -> String {
@@ -313,6 +313,18 @@ impl NativeRun {
 
     fn events(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         run_events_to_python(py, &self.state.events())
+    }
+
+    #[pyo3(signature = (after_sequence=0, timeout_ms=None))]
+    fn wait_for_events(
+        &self,
+        py: Python<'_>,
+        after_sequence: u64,
+        timeout_ms: Option<u64>,
+    ) -> PyResult<Py<PyAny>> {
+        let state = self.state.clone();
+        let events = py.allow_threads(move || state.wait_for_events(after_sequence, timeout_ms));
+        run_events_to_python(py, &events)
     }
 
     fn audit_events(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -761,6 +773,34 @@ fn audit_events_to_python(py: Python<'_>, events: &[AuditEvent]) -> PyResult<Py<
     let list = PyList::empty_bound(py);
     for event in events {
         list.append(audit_event_to_python(py, event))?;
+    }
+    Ok(list.into_any().unbind())
+}
+
+fn run_summary_to_python(py: Python<'_>, summary: &RunSummary) -> Py<PyAny> {
+    let payload = PyDict::new_bound(py);
+    payload
+        .set_item("run_id", summary.run_id.clone())
+        .expect("run summary run_id");
+    payload
+        .set_item("started_at_ms", summary.started_at_ms)
+        .expect("run summary started_at_ms");
+    payload
+        .set_item("status", summary.status.as_str())
+        .expect("run summary status");
+    payload
+        .set_item("exit_code", summary.exit_code)
+        .expect("run summary exit_code");
+    payload
+        .set_item("termination_reason", summary.termination_reason.clone())
+        .expect("run summary termination_reason");
+    payload.into_any().unbind()
+}
+
+fn run_summaries_to_python(py: Python<'_>, summaries: &[RunSummary]) -> PyResult<Py<PyAny>> {
+    let list = PyList::empty_bound(py);
+    for summary in summaries {
+        list.append(run_summary_to_python(py, summary))?;
     }
     Ok(list.into_any().unbind())
 }

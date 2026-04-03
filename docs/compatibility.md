@@ -12,10 +12,10 @@
 - shell-first file and text workflows via `cd`, `export`, `expr`, `time`, `timeout`, `whoami`, `hostname`, `help`, `clear`, `history`, `alias`, `unalias`, `bash`, `sh`, `env`, `which`, `dirname`, `basename`, `curl`, `tree`, `stat`, `du`, `file`, `readlink`, `ln`, `cat`, `grep`, `egrep`, `fgrep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, `tr`, `paste`, `sed`, `join`, `awk`, `jq`, `yq`, `sqlite3`, `find`, `ls`, `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `html-to-markdown`, `rm`, `rmdir`, `cp`, `mv`, `tee`, `printf`, `seq`, `date`, `comm`, `diff`, `column`, `chmod`, `python`, `python3`, `js-exec`, `xan`, `xargs`, `rg`, `split`, `od`, `base64`, `md5sum`, `sha1sum`, `sha256sum`, `gzip`, `tar`, `mkdir`, and `touch`
 - typed `NetworkPolicy` configuration surface
 - in-process detached execution via `Bash.exec_detached()`
-- one-active-run session handles with `wait`, `cancel`, `status`, and buffered output accessors
-- buffered run events plus buffered session audit records
+- multi-run detached handles with `wait`, per-run `cancel`, `status`, retained output accessors, and queued session execution
+- retained run events, retained session audit records, session run summaries, and live `BashRun.stream_events()` / `stream_output()`
 - optional Python event and audit callbacks with sanitized payloads
-- host-side custom command registration for argv mode and script-internal command dispatch, plus top-level pre/post execution hooks
+- host-side custom command registration for argv mode and script-internal command dispatch, optional `CustomCommandContext`, delegated nested exec helpers, plus top-level pre/post execution hooks
 - filesystem session persistence for `memory` and `host_cow`
 - host-backed workspace modes with one legacy `/workspace` mount or explicit multi-mount configuration
 - narrow lazy file-provider hooks for command-time direct reads
@@ -136,5 +136,5 @@
 - unrestricted host filesystem access
 - unrestricted internet access
 - cross-process detached-run persistence or resume
-- live streaming stdout/stderr logs
+- true byte-streamed stdout/stderr process pipes
 - TTY emulation or job control

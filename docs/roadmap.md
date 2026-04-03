@@ -1,85 +1,67 @@
 # Roadmap
 
-Comparison baseline: `just-bash` from Vercel Labs.
+Command-name parity with `just-bash` is done. The remaining work is mostly behavior depth, runtime shape, backend maturity.
 
-This comparison pass is complete. Command-name parity is done. The remaining differences are now explicit product decisions, not active roadmap work.
+## Already In `just-bash`
 
-## Closed Decisions
+- richer custom commands with first-class shell composition
+- nested command execution from custom-command context
+- AST transform/plugin surface
+- multi-mount filesystem as a first-class public model
+- lazy files participating in direct reads and directory listings
+- broader shell control flow: `case`, `return`, `break`, `continue`
+- command substitution and subshell execution
+- deeper builtin behavior across `awk`, `jq`, `yq`, `xan`, `curl`, `sqlite3`, `tar`, `python3`
+- per-exec shell reset as the default model
+- stronger JavaScript isolation direction through QuickJS/WASM
 
-### Custom Commands
+## Partial In `just-bash`
 
-- custom commands run in argv mode and inside script-mode pipelines and redirections
-- request payloads already carry command argv, cwd, env, stdin, timeout, metadata, filesystem mode, and network flag
-- nested sandbox execution from inside a custom command callback is not part of the current extension model
-- AST rewrite plugins remain out of scope
+- detached command handles exist, but logs are still buffered after completion rather than truly live
+- sandbox command APIs cover `wait`, `kill`, `stdout`, `stderr`, `output`, `logs`, but not a session-owned retained event/audit model
+- network tooling is broader, but still policy-driven rather than a full unrestricted runtime
+- shell breadth is much higher, but still not complete GNU/bash fidelity
 
-Current product line:
+## `abash`-Specific Next Work
 
-- host callbacks stay small and predictable
-- top-level pre/post hooks remain boundary hooks, not shell-internal rewrites
+### Tier 1: Runtime And Embedding
 
-### Filesystem Shape
+- [x] add live stdout/stderr/event streaming instead of buffered snapshots only
+- [x] broaden detached execution beyond one active run per `Bash` session
+- [x] retain a stronger session-owned event/audit model as runs grow more capable
+- [x] deepen custom-command context with explicit supported runtime metadata
+- [x] let custom commands invoke nested sandbox work through a narrow stable helper surface
 
-- explicit multi-mount host configuration is supported
-- legacy `workspace_root="/workspace"` remains compatibility sugar
-- lazy file providers are supported for command-time direct reads
-- directory-aware provider adapters are not part of the current line
+### Tier 2: Filesystem And Providers
 
-Current product line:
+- [ ] make lazy file providers visible to directory-oriented operations too: `find`, `ls`, `tree`, Python file helpers
+- [ ] decide whether broader mount adapter types should move from embedding-only experiments into the main product line
+- [ ] decide how far host copy-on-write should go on delete semantics and whiteouts
 
-- path guarantees stay strict
-- writable policy stays sandbox-path based
-- lazy providers are intentionally narrower than real host mounts
+### Tier 3: Shell And Builtins
 
-### JavaScript Runtime
+- [ ] add `case`
+- [ ] add `return` inside script functions
+- [ ] add `break`
+- [ ] add `continue`
+- [ ] evaluate command substitution
+- [ ] evaluate subshell execution
+- [ ] deepen `awk`, `jq`, `yq`, `xan`, `curl`, `sqlite3`, `tar`, `python3`, `js-exec` where narrow behavior still blocks real workflows
 
-- `js-exec` stays host-Node based in the current line
-- no isolated QuickJS/WASM mode is planned in this repo right now
+### Tier 4: Backend Maturity
 
-Current product line:
+- [ ] activate the Linux real-shell backend behind the intended isolation model
+- [ ] define the long-term story for `nsjail` vs any alternative Linux sandbox strategy
+- [ ] decide whether a stronger JavaScript isolation mode is worth adding alongside host-runtime `js-exec`
 
-- the trust model is explicit in docs
-- parity with `just-bash` stops at command shape here, not runtime isolation
+### Tier 5: Product Defaults To Revisit Only With Demand
 
-### Execution Model
+- [ ] re-evaluate the default session model if most embedders prefer `per_exec` over persistent shell state
+- [ ] re-evaluate AST/plugin rewrite hooks if custom-command demand grows past the current top-level hooks
+- [ ] re-evaluate full GNU/bash fidelity only when narrow behavior keeps blocking real workflows
 
-- default shell state remains session-persistent
-- `session_state="per_exec"` stays the opt-in reset mode
-- `replace_env=True` stays the narrow per-call env reset control
+## Notes
 
-Current product line:
-
-- filesystem persistence is separate from shell-state persistence
-- the default will not flip unless clear product demand shows up
-
-### Builtin Depth
-
-- builtin deepening is no longer tracked as a parity roadmap item
-- future work is workflow-driven
-
-Current product line:
-
-- broad command surface
-- intentionally narrow behavior where documented
-
-### Shell Surface
-
-- the current shell subset is the intended surface for now
-- future shell growth is blocked-workflow driven, not parity-count driven
-
-Current product line:
-
-- loops and narrow functions are enough for the current target workflows
-- `case`, subshells, command substitution, `return`, `break`, and `continue` stay out of scope unless a concrete need changes that call
-
-## Working Rule
-
-When new work resumes:
-
-1. prioritize embedder value over parity theater
-2. keep host-trust tradeoffs explicit
-3. only broaden semantics when a real workflow justifies the extra complexity
-
-## Status
-
-No active comparison-roadmap items remain from the `just-bash` pass.
+- `docs/known-limitations.md` remains the honest source for current behavior.
+- this roadmap tracks the next valuable lifts, not every missing flag
+- `just-bash` is a useful reference point, but not every upstream choice should become a default in `abash`

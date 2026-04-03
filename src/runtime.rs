@@ -4,18 +4,22 @@ use std::sync::{
     Arc,
 };
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use abash_core::{
-    ErrorKind, ExecutionRequest, ExecutionResult, SandboxError, SandboxExtensions, SandboxSession,
+    ErrorKind, ExecutionRequest, ExecutionResult, ExtensionCommandResult, SandboxError,
+    SandboxExtensions, SandboxSession,
 };
 use parking_lot::{Condvar, Mutex};
 use pyo3::prelude::*;
 
-use crate::observability::{AuditEvent, AuditEventKind, RunEvent, RunEventKind, RunStatus};
+use crate::observability::{
+    AuditEvent, AuditEventKind, RunEvent, RunEventKind, RunStatus, RunSummary,
+};
 
 const MAX_RETAINED_EVENTS: usize = 64;
 const MAX_RETAINED_AUDITS: usize = 64;
+const MAX_RETAINED_RUNS: usize = 64;
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -43,7 +47,7 @@ impl SandboxExtensions for PythonExtensions {
     fn exec_custom_command(
         &self,
         request: &ExecutionRequest,
-    ) -> Result<Option<ExecutionResult>, SandboxError> {
+    ) -> Result<Option<ExtensionCommandResult>, SandboxError> {
         let Some(command) = request.argv.first() else {
             return Ok(None);
         };
@@ -53,25 +57,35 @@ impl SandboxExtensions for PythonExtensions {
         let Some(callback) = self.custom_command_callback.as_ref() else {
             return Ok(None);
         };
-        Python::with_gil(|py| -> Result<Option<ExecutionResult>, SandboxError> {
-            let request_payload =
-                crate::execution_request_to_python(py, request).map_err(python_callback_error)?;
-            let result_payload = callback
-                .bind(py)
-                .call1((request_payload,))
-                .map_err(python_callback_error)?;
-            let mut result = crate::python_to_execution_result(&result_payload)
-                .map_err(python_callback_error)?;
-            result
-                .metadata
-                .entry("backend".to_string())
-                .or_insert_with(|| "custom".to_string());
-            result
-                .metadata
-                .entry("command".to_string())
-                .or_insert_with(|| command.clone());
-            Ok(Some(result))
-        })
+        Python::with_gil(
+            |py| -> Result<Option<ExtensionCommandResult>, SandboxError> {
+                let request_payload = crate::execution_request_to_python(py, request)
+                    .map_err(python_callback_error)?;
+                let result_payload = callback
+                    .bind(py)
+                    .call1((request_payload,))
+                    .map_err(python_callback_error)?;
+                if let Ok(delegated_request) = result_payload.get_item("delegated_request") {
+                    if !delegated_request.is_none() {
+                        return crate::python_to_execution_request(&delegated_request)
+                            .map(ExtensionCommandResult::Delegate)
+                            .map(Some)
+                            .map_err(python_callback_error);
+                    }
+                }
+                let mut result = crate::python_to_execution_result(&result_payload)
+                    .map_err(python_callback_error)?;
+                result
+                    .metadata
+                    .entry("backend".to_string())
+                    .or_insert_with(|| "custom".to_string());
+                result
+                    .metadata
+                    .entry("command".to_string())
+                    .or_insert_with(|| command.clone());
+                Ok(Some(ExtensionCommandResult::Completed(result)))
+            },
+        )
     }
 
     fn read_lazy_file(&self, path: &str) -> Result<Option<Vec<u8>>, SandboxError> {
@@ -111,14 +125,14 @@ impl SandboxExtensions for PythonExtensions {
 
 pub struct SandboxRuntime {
     session: Arc<Mutex<SandboxSession>>,
-    cancel_flag: Arc<AtomicBool>,
     session_id: String,
     backend: String,
     profile: String,
     filesystem_mode: String,
     callbacks: RuntimeCallbacks,
     next_run_id: AtomicU64,
-    active_run: Arc<Mutex<Option<Arc<RunState>>>>,
+    runs: Arc<Mutex<VecDeque<Arc<RunState>>>>,
+    event_log: Arc<Mutex<VecDeque<RunEvent>>>,
     audit_log: Arc<Mutex<VecDeque<AuditEvent>>>,
     next_audit_sequence: Arc<AtomicU64>,
 }
@@ -136,6 +150,7 @@ struct RunStateInner {
 pub struct RunState {
     run_id: String,
     started_at_ms: u64,
+    cancel_flag: Arc<AtomicBool>,
     inner: Mutex<RunStateInner>,
     condvar: Condvar,
 }
@@ -145,6 +160,7 @@ impl RunState {
         Self {
             run_id,
             started_at_ms,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
             inner: Mutex::new(RunStateInner {
                 status: RunStatus::Pending,
                 result: None,
@@ -166,6 +182,13 @@ impl RunState {
 
     pub fn status(&self) -> RunStatus {
         self.inner.lock().status.clone()
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status(),
+            RunStatus::Completed | RunStatus::Cancelled | RunStatus::Failed
+        )
     }
 
     pub fn wait(&self) -> ExecutionResult {
@@ -218,17 +241,20 @@ impl RunState {
     }
 
     fn set_status(&self, status: RunStatus) {
-        self.inner.lock().status = status;
+        let mut guard = self.inner.lock();
+        guard.status = status;
     }
 
     fn push_event(&self, event: RunEvent) {
         let mut guard = self.inner.lock();
         push_bounded(&mut guard.events, event, MAX_RETAINED_EVENTS);
+        self.condvar.notify_all();
     }
 
     fn push_audit(&self, audit: AuditEvent) {
         let mut guard = self.inner.lock();
         push_bounded(&mut guard.audits, audit, MAX_RETAINED_AUDITS);
+        self.condvar.notify_all();
     }
 
     fn next_event_sequence(&self) -> u64 {
@@ -244,14 +270,57 @@ impl RunState {
         guard.result = Some(result);
         self.condvar.notify_all();
     }
+
+    pub fn cancel(&self) {
+        self.cancel_flag.store(true, Ordering::SeqCst);
+        self.condvar.notify_all();
+    }
+
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        self.cancel_flag.clone()
+    }
+
+    pub fn wait_for_events(&self, after_sequence: u64, timeout_ms: Option<u64>) -> Vec<RunEvent> {
+        let mut guard = self.inner.lock();
+        let timeout = timeout_ms.map(Duration::from_millis);
+        loop {
+            let events: Vec<RunEvent> = guard
+                .events
+                .iter()
+                .filter(|event| event.sequence > after_sequence)
+                .cloned()
+                .collect();
+            if !events.is_empty() || terminal_status_locked(&guard.status) {
+                return events;
+            }
+            match timeout {
+                Some(duration) => {
+                    if self.condvar.wait_for(&mut guard, duration).timed_out() {
+                        return Vec::new();
+                    }
+                }
+                None => self.condvar.wait(&mut guard),
+            }
+        }
+    }
+
+    pub fn summary(&self) -> RunSummary {
+        let guard = self.inner.lock();
+        RunSummary {
+            run_id: self.run_id.clone(),
+            started_at_ms: self.started_at_ms,
+            status: guard.status.clone(),
+            exit_code: guard.result.as_ref().map(|result| result.exit_code),
+            termination_reason: guard
+                .result
+                .as_ref()
+                .map(|result| result.termination_reason.as_str().to_string()),
+        }
+    }
 }
 
 impl SandboxRuntime {
-    pub fn new(
-        session: Arc<Mutex<SandboxSession>>,
-        cancel_flag: Arc<AtomicBool>,
-        callbacks: RuntimeCallbacks,
-    ) -> Self {
+    pub fn new(session: Arc<Mutex<SandboxSession>>, callbacks: RuntimeCallbacks) -> Self {
         let metadata = session.lock().base_metadata();
         let backend = metadata
             .get("backend")
@@ -268,14 +337,14 @@ impl SandboxRuntime {
         let session_id = format!("session-{}", NEXT_SESSION_ID.fetch_add(1, Ordering::SeqCst));
         let runtime = Self {
             session,
-            cancel_flag,
             session_id,
             backend,
             profile,
             filesystem_mode,
             callbacks,
             next_run_id: AtomicU64::new(1),
-            active_run: Arc::new(Mutex::new(None)),
+            runs: Arc::new(Mutex::new(VecDeque::new())),
+            event_log: Arc::new(Mutex::new(VecDeque::new())),
             audit_log: Arc::new(Mutex::new(VecDeque::new())),
             next_audit_sequence: Arc::new(AtomicU64::new(1)),
         };
@@ -284,35 +353,34 @@ impl SandboxRuntime {
     }
 
     pub fn exec_detached(&self, request: ExecutionRequest) -> Result<Arc<RunState>, SandboxError> {
-        self.ensure_can_start_run()?;
-        self.cancel_flag.store(false, Ordering::SeqCst);
+        self.ensure_session_open()?;
 
         let sequence = self.next_run_id.fetch_add(1, Ordering::SeqCst);
         let run_id = format!("{}-run-{sequence}", self.session_id);
         let run = Arc::new(RunState::new(run_id, now_unix_ms()));
 
         {
-            let mut active = self.active_run.lock();
-            *active = Some(run.clone());
+            let mut runs = self.runs.lock();
+            push_bounded(&mut runs, run.clone(), MAX_RETAINED_RUNS);
         }
 
         self.record_run_audit(&run, AuditEventKind::RunRequested, None);
 
         let session = self.session.clone();
-        let active_run = self.active_run.clone();
         let runtime = self.clone_for_thread();
         let run_state = run.clone();
+        let cancel_flag = run.cancel_flag();
 
         thread::spawn(move || {
-            run_state.set_status(RunStatus::Running);
-            runtime.record_run_event(&run_state, RunEventKind::RunStarted, None, None, None, None);
-            let result = runtime.execute_request(&session, request);
+            let result =
+                runtime.execute_request(&session, request, &run_state, cancel_flag.as_ref());
             let terminal_status = terminal_status(&result);
 
             if !result.stdout.is_empty() {
                 runtime.record_run_event(
                     &run_state,
                     RunEventKind::Stdout,
+                    None,
                     Some("stdout".to_string()),
                     Some(String::from_utf8_lossy(&result.stdout).to_string()),
                     None,
@@ -323,6 +391,7 @@ impl SandboxRuntime {
                 runtime.record_run_event(
                     &run_state,
                     RunEventKind::Stderr,
+                    None,
                     Some("stderr".to_string()),
                     Some(String::from_utf8_lossy(&result.stderr).to_string()),
                     None,
@@ -369,23 +438,16 @@ impl SandboxRuntime {
                 RunStatus::Pending | RunStatus::Running => RunEventKind::RunFailed,
             };
 
-            run_state.finish(result.clone(), terminal_status.clone());
             runtime.record_run_event(
                 &run_state,
                 terminal_kind,
+                Some(terminal_status.clone()),
                 None,
                 None,
                 Some(result.exit_code),
                 Some(result.termination_reason.as_str().to_string()),
             );
-
-            let mut active = active_run.lock();
-            if active
-                .as_ref()
-                .is_some_and(|active_run| active_run.run_id() == run_state.run_id())
-            {
-                *active = None;
-            }
+            run_state.finish(result.clone(), terminal_status.clone());
         });
 
         Ok(run)
@@ -396,8 +458,13 @@ impl SandboxRuntime {
         Ok(run.wait())
     }
 
-    pub fn cancel_active(&self) {
-        self.cancel_flag.store(true, Ordering::SeqCst);
+    pub fn cancel_all_runs(&self) {
+        let runs: Vec<_> = self.runs.lock().iter().cloned().collect();
+        for run in runs {
+            if !run.is_terminal() {
+                run.cancel();
+            }
+        }
     }
 
     pub fn read_file(&self, path: &str) -> Result<Vec<u8>, SandboxError> {
@@ -438,17 +505,15 @@ impl SandboxRuntime {
         self.audit_log.lock().iter().cloned().collect()
     }
 
-    fn ensure_can_start_run(&self) -> Result<(), SandboxError> {
-        if self
-            .active_run
-            .lock()
-            .as_ref()
-            .is_some_and(|run| matches!(run.status(), RunStatus::Pending | RunStatus::Running))
-        {
-            return Err(SandboxError::InvalidRequest(
-                "sandbox already has an active run".to_string(),
-            ));
-        }
+    pub fn run_events(&self) -> Vec<RunEvent> {
+        self.event_log.lock().iter().cloned().collect()
+    }
+
+    pub fn run_summaries(&self) -> Vec<RunSummary> {
+        self.runs.lock().iter().map(|run| run.summary()).collect()
+    }
+
+    fn ensure_session_open(&self) -> Result<(), SandboxError> {
         if self.session.lock().is_closed() {
             return Err(SandboxError::ClosedSession);
         }
@@ -457,10 +522,10 @@ impl SandboxRuntime {
 
     fn ensure_idle(&self) -> Result<(), SandboxError> {
         if self
-            .active_run
+            .runs
             .lock()
-            .as_ref()
-            .is_some_and(|run| matches!(run.status(), RunStatus::Pending | RunStatus::Running))
+            .iter()
+            .any(|run| matches!(run.status(), RunStatus::Pending | RunStatus::Running))
         {
             return Err(SandboxError::InvalidRequest(
                 "sandbox has an active run; wait or cancel it before file or lifecycle operations"
@@ -486,6 +551,7 @@ impl SandboxRuntime {
                 pre_exec_hook: self.callbacks.pre_exec_hook.clone(),
                 post_exec_hook: self.callbacks.post_exec_hook.clone(),
             },
+            event_log: self.event_log.clone(),
             audit_log: self.audit_log.clone(),
             next_audit_sequence: self.next_audit_sequence.clone(),
         }
@@ -548,6 +614,7 @@ struct ThreadRuntime {
     profile: String,
     filesystem_mode: String,
     callbacks: RuntimeCallbacks,
+    event_log: Arc<Mutex<VecDeque<RunEvent>>>,
     audit_log: Arc<Mutex<VecDeque<AuditEvent>>>,
     next_audit_sequence: Arc<AtomicU64>,
 }
@@ -557,14 +624,31 @@ impl ThreadRuntime {
         &self,
         session: &Arc<Mutex<SandboxSession>>,
         request: ExecutionRequest,
+        run: &RunState,
+        cancel_flag: &AtomicBool,
     ) -> ExecutionResult {
-        let effective_request = match self.apply_pre_exec_hook(&request) {
+        let mut effective_request = match self.apply_pre_exec_hook(&request) {
             Ok(request) => request,
             Err(error) => return ExecutionResult::failure(error, session.lock().base_metadata()),
         };
+        decorate_request_metadata(
+            &mut effective_request,
+            &self.session_id,
+            run.run_id(),
+            &self.backend,
+            &self.profile,
+            &self.filesystem_mode,
+        );
+        run.set_status(RunStatus::Running);
+        self.record_run_event(run, RunEventKind::RunStarted, None, None, None, None, None);
         let mut result = match self.run_custom_command(&effective_request) {
-            Ok(Some(result)) => result,
-            Ok(None) => session.lock().run(effective_request.clone()),
+            Ok(Some(ExtensionCommandResult::Completed(result))) => result,
+            Ok(Some(ExtensionCommandResult::Delegate(delegated_request))) => session
+                .lock()
+                .run_with_cancel(delegated_request, cancel_flag),
+            Ok(None) => session
+                .lock()
+                .run_with_cancel(effective_request.clone(), cancel_flag),
             Err(error) => ExecutionResult::failure(error, session.lock().base_metadata()),
         };
         self.apply_post_exec_hook(&effective_request, &mut result);
@@ -574,7 +658,7 @@ impl ThreadRuntime {
     fn run_custom_command(
         &self,
         request: &ExecutionRequest,
-    ) -> Result<Option<ExecutionResult>, SandboxError> {
+    ) -> Result<Option<ExtensionCommandResult>, SandboxError> {
         if request.mode != abash_core::ExecutionMode::Argv {
             return Ok(None);
         }
@@ -584,19 +668,34 @@ impl ThreadRuntime {
             lazy_file_callback: self.callbacks.lazy_file_callback.clone(),
             lazy_mount_roots: self.callbacks.lazy_mount_roots.clone(),
         };
-        let mut result = match extensions.exec_custom_command(request)? {
+        let extension_result = match extensions.exec_custom_command(request)? {
             Some(result) => result,
             None => return Ok(None),
         };
-        result
-            .metadata
-            .entry("profile".to_string())
-            .or_insert_with(|| self.profile.clone());
-        result
-            .metadata
-            .entry("filesystem_mode".to_string())
-            .or_insert_with(|| self.filesystem_mode.clone());
-        Ok(Some(result))
+        Ok(Some(match extension_result {
+            ExtensionCommandResult::Completed(mut result) => {
+                result
+                    .metadata
+                    .entry("profile".to_string())
+                    .or_insert_with(|| self.profile.clone());
+                result
+                    .metadata
+                    .entry("filesystem_mode".to_string())
+                    .or_insert_with(|| self.filesystem_mode.clone());
+                ExtensionCommandResult::Completed(result)
+            }
+            ExtensionCommandResult::Delegate(mut request) => {
+                request
+                    .metadata
+                    .entry("profile".to_string())
+                    .or_insert_with(|| self.profile.clone());
+                request
+                    .metadata
+                    .entry("filesystem_mode".to_string())
+                    .or_insert_with(|| self.filesystem_mode.clone());
+                ExtensionCommandResult::Delegate(request)
+            }
+        }))
     }
 
     fn apply_pre_exec_hook(
@@ -649,6 +748,7 @@ impl ThreadRuntime {
         &self,
         run: &RunState,
         kind: RunEventKind,
+        status_override: Option<RunStatus>,
         stream: Option<String>,
         text: Option<String>,
         exit_code: Option<i32>,
@@ -659,7 +759,7 @@ impl ThreadRuntime {
             sequence: run.next_event_sequence(),
             timestamp_ms: now_unix_ms(),
             kind,
-            status: run.status(),
+            status: status_override.unwrap_or_else(|| run.status()),
             stream,
             text,
             exit_code,
@@ -667,6 +767,10 @@ impl ThreadRuntime {
             metadata: default_event_metadata(&self.backend, &self.profile, &self.filesystem_mode),
         };
         run.push_event(event.clone());
+        {
+            let mut log = self.event_log.lock();
+            push_bounded(&mut log, event.clone(), MAX_RETAINED_EVENTS);
+        }
         let Some(callback) = self.callbacks.event_callback.as_ref() else {
             return;
         };
@@ -721,12 +825,56 @@ fn default_event_metadata(
     metadata
 }
 
+fn decorate_request_metadata(
+    request: &mut ExecutionRequest,
+    session_id: &str,
+    run_id: &str,
+    backend: &str,
+    profile: &str,
+    filesystem_mode: &str,
+) {
+    request
+        .metadata
+        .entry("session_id".to_string())
+        .or_insert_with(|| session_id.to_string());
+    request
+        .metadata
+        .entry("run_id".to_string())
+        .or_insert_with(|| run_id.to_string());
+    request
+        .metadata
+        .entry("backend".to_string())
+        .or_insert_with(|| backend.to_string());
+    request
+        .metadata
+        .entry("profile".to_string())
+        .or_insert_with(|| profile.to_string());
+    request
+        .metadata
+        .entry("filesystem_mode".to_string())
+        .or_insert_with(|| filesystem_mode.to_string());
+    request
+        .metadata
+        .entry("request_mode".to_string())
+        .or_insert_with(|| match request.mode {
+            abash_core::ExecutionMode::Argv => "argv".to_string(),
+            abash_core::ExecutionMode::Script => "script".to_string(),
+        });
+}
+
 fn terminal_status(result: &ExecutionResult) -> RunStatus {
     match result.error.as_ref().map(|error| &error.kind) {
         Some(ErrorKind::Cancellation) => RunStatus::Cancelled,
         Some(_) => RunStatus::Failed,
         None => RunStatus::Completed,
     }
+}
+
+fn terminal_status_locked(status: &RunStatus) -> bool {
+    matches!(
+        status,
+        RunStatus::Completed | RunStatus::Cancelled | RunStatus::Failed
+    )
 }
 
 fn classify_policy_audit(reason: &str) -> AuditEventKind {
