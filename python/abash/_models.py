@@ -139,6 +139,9 @@ class BashOptions:
     custom_commands: dict[
         str, Callable[["ExecutionRequest"], "ExecutionResult | str | bytes"]
     ] = field(default_factory=dict)
+    lazy_file_providers: dict[str, Callable[[str], str | bytes | None]] = field(
+        default_factory=dict
+    )
     pre_exec_hook: Callable[["ExecutionRequest"], "ExecutionRequest | None"] | None = None
     post_exec_hook: Callable[
         ["ExecutionRequest", "ExecutionResult"], "ExecutionResult | None"

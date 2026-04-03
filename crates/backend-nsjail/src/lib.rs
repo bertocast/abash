@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicBool;
+use std::sync::{atomic::AtomicBool, Arc};
 
 use abash_core::{
     ExecutionRequest, ExecutionResult, SandboxConfig, SandboxError, SandboxExtensions,
@@ -21,7 +21,7 @@ impl SessionBackend for NsjailSession {
         _request: ExecutionRequest,
         _config: &SandboxConfig,
         _cancel_flag: &AtomicBool,
-        _extensions: Option<&dyn SandboxExtensions>,
+        _extensions: Option<Arc<dyn SandboxExtensions>>,
     ) -> Result<ExecutionResult, SandboxError> {
         Err(SandboxError::UnsupportedFeature(
             backend_message().to_string(),

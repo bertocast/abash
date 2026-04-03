@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -70,6 +73,7 @@ pub fn create_session(config: SandboxConfig) -> Result<Box<dyn SessionBackend>, 
         exported_env: BTreeMap::new(),
         aliases: BTreeMap::new(),
         history: Vec::new(),
+        active_extensions: None,
     }))
 }
 
@@ -81,6 +85,7 @@ struct VirtualSession {
     exported_env: BTreeMap<String, String>,
     aliases: BTreeMap<String, Vec<String>>,
     history: Vec<String>,
+    active_extensions: Option<Arc<dyn SandboxExtensions>>,
 }
 
 impl SessionBackend for VirtualSession {
@@ -93,8 +98,9 @@ impl SessionBackend for VirtualSession {
         request: ExecutionRequest,
         config: &SandboxConfig,
         cancel_flag: &AtomicBool,
-        extensions: Option<&dyn SandboxExtensions>,
+        extensions: Option<Arc<dyn SandboxExtensions>>,
     ) -> Result<ExecutionResult, SandboxError> {
+        self.active_extensions = extensions.clone();
         if request.network_enabled && config.network_policy.is_none() {
             return Err(SandboxError::PolicyDenied(
                 "network access is disabled unless explicit policy is configured".to_string(),
@@ -147,12 +153,20 @@ impl SessionBackend for VirtualSession {
         self.push_history(render_history_entry(&request));
 
         let result = match request.mode {
-            ExecutionMode::Argv => {
-                self.run_argv(&mut runtime, request, config, cancel_flag, extensions)
-            }
-            ExecutionMode::Script => {
-                self.run_script(&mut runtime, request, config, cancel_flag, extensions)
-            }
+            ExecutionMode::Argv => self.run_argv(
+                &mut runtime,
+                request,
+                config,
+                cancel_flag,
+                extensions.as_deref(),
+            ),
+            ExecutionMode::Script => self.run_script(
+                &mut runtime,
+                request,
+                config,
+                cancel_flag,
+                extensions.as_deref(),
+            ),
         };
 
         if matches!(self.session_state, SessionState::Persistent) {
@@ -161,11 +175,12 @@ impl SessionBackend for VirtualSession {
             self.aliases = runtime.aliases.clone();
         }
 
+        self.active_extensions = None;
         result
     }
 
     fn read_file(&mut self, path: &str) -> Result<Vec<u8>, SandboxError> {
-        self.filesystem.read_file(path)
+        self.read_path(path)
     }
 
     fn write_file(
@@ -187,6 +202,26 @@ impl SessionBackend for VirtualSession {
 }
 
 impl VirtualSession {
+    fn read_path(&self, path: &str) -> Result<Vec<u8>, SandboxError> {
+        match self.filesystem.read_file(path) {
+            Ok(contents) => Ok(contents),
+            Err(SandboxError::InvalidRequest(_)) => {
+                let Some(extensions) = self.active_extensions.as_deref() else {
+                    return Err(SandboxError::InvalidRequest(format!(
+                        "file does not exist: {path}"
+                    )));
+                };
+                match extensions.read_lazy_file(path)? {
+                    Some(contents) => Ok(contents),
+                    None => Err(SandboxError::InvalidRequest(format!(
+                        "file does not exist: {path}"
+                    ))),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn run_argv(
         &mut self,
         runtime: &mut RuntimeState,
@@ -742,7 +777,7 @@ impl VirtualSession {
                     &runtime.cwd,
                     &path.expand(&command_env, &runtime.positional_args)?,
                 )?;
-                self.filesystem.read_file(&resolved)?
+                self.read_path(&resolved)?
             } else if let Some(input) = piped_stdin.take() {
                 input
             } else {
@@ -1349,7 +1384,7 @@ impl VirtualSession {
 
     fn write_redirect_file(&mut self, write: &PendingFileWrite) -> Result<(), SandboxError> {
         let contents = if write.target.append {
-            let mut existing = match self.filesystem.read_file(&write.target.path) {
+            let mut existing = match self.read_path(&write.target.path) {
                 Ok(bytes) => bytes,
                 Err(error) if error.kind() == abash_core::ErrorKind::InvalidRequest => Vec::new(),
                 Err(error) => return Err(error),
@@ -2142,7 +2177,7 @@ impl VirtualSession {
             tier3_exec::ShellProgram::Inline(source) => source,
             tier3_exec::ShellProgram::File(path) => {
                 let resolved = resolve_sandbox_path(cwd, &path)?;
-                String::from_utf8(self.filesystem.read_file(&resolved)?).map_err(|_| {
+                String::from_utf8(self.read_path(&resolved)?).map_err(|_| {
                     SandboxError::InvalidRequest(
                         "bash/sh script files currently require UTF-8 text".to_string(),
                     )
@@ -2185,7 +2220,7 @@ impl VirtualSession {
             cwd,
             &args,
             stdin,
-            |path| self.filesystem.read_file(path),
+            |path| self.read_path(path),
             || self.filesystem.list_paths(),
             |path| self.filesystem.is_dir(path),
         )?;
@@ -2628,7 +2663,7 @@ impl VirtualSession {
     ) -> Result<ExecutionResult, SandboxError> {
         let rendered = awk::execute(&args, stdin, |path| {
             let resolved = resolve_sandbox_path(cwd, path)?;
-            self.filesystem.read_file(&resolved)
+            self.read_path(&resolved)
         })?;
         Ok(ExecutionResult::success(rendered, metadata))
     }
@@ -2642,7 +2677,7 @@ impl VirtualSession {
     ) -> Result<ExecutionResult, SandboxError> {
         let result = jq::execute(&args, stdin, |path| {
             let resolved = resolve_sandbox_path(cwd, path)?;
-            self.filesystem.read_file(&resolved)
+            self.read_path(&resolved)
         })?;
         Ok(ExecutionResult {
             stdout: result.stdout,
@@ -2661,7 +2696,7 @@ impl VirtualSession {
         stdin: Vec<u8>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
-        let result = xancmd::execute(cwd, &args, stdin, |path| self.filesystem.read_file(path))?;
+        let result = xancmd::execute(cwd, &args, stdin, |path| self.read_path(path))?;
         Ok(ExecutionResult {
             stdout: result.output,
             stderr: Vec::new(),
@@ -2681,7 +2716,7 @@ impl VirtualSession {
     ) -> Result<ExecutionResult, SandboxError> {
         let result = yq::execute(&args, stdin, |path| {
             let resolved = resolve_sandbox_path(cwd, path)?;
-            self.filesystem.read_file(&resolved)
+            self.read_path(&resolved)
         })?;
         for writeback in result.writebacks {
             let resolved = resolve_sandbox_path(cwd, &writeback.path)?;
@@ -2753,7 +2788,7 @@ impl VirtualSession {
         let rendered = tier2_files::stat(
             cwd,
             &args,
-            |path| self.filesystem.read_file(path),
+            |path| self.read_path(path),
             |path| self.filesystem.is_dir(path),
             |path| self.filesystem.get_mode_bits(path),
             |path| self.filesystem.read_link(path),
@@ -2773,7 +2808,7 @@ impl VirtualSession {
             cwd,
             &args,
             |path| self.filesystem.exists(path),
-            |path| self.filesystem.read_file(path),
+            |path| self.read_path(path),
             |path| self.filesystem.is_dir(path),
             &candidates,
         )?;
@@ -2794,8 +2829,7 @@ impl VirtualSession {
         stdin: Vec<u8>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
-        let result =
-            htmltomarkdown::execute(cwd, &args, &stdin, |path| self.filesystem.read_file(path))?;
+        let result = htmltomarkdown::execute(cwd, &args, &stdin, |path| self.read_path(path))?;
         Ok(ExecutionResult {
             stdout: result.stdout,
             stderr: result.stderr,
@@ -2907,7 +2941,7 @@ impl VirtualSession {
         let rendered = tier2_files::file(
             cwd,
             &args,
-            |path| self.filesystem.read_file(path),
+            |path| self.read_path(path),
             |path| self.filesystem.is_dir(path),
             |path| self.filesystem.read_link(path),
         )?;
@@ -2979,7 +3013,7 @@ impl VirtualSession {
         stdin: Vec<u8>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
-        let rendered = tier2_text::rev(cwd, &args, stdin, |path| self.filesystem.read_file(path))?;
+        let rendered = tier2_text::rev(cwd, &args, stdin, |path| self.read_path(path))?;
         Ok(ExecutionResult::success(rendered, metadata))
     }
 
@@ -2990,7 +3024,7 @@ impl VirtualSession {
         stdin: Vec<u8>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
-        let rendered = tier2_text::nl(cwd, &args, stdin, |path| self.filesystem.read_file(path))?;
+        let rendered = tier2_text::nl(cwd, &args, stdin, |path| self.read_path(path))?;
         Ok(ExecutionResult::success(rendered, metadata))
     }
 
@@ -3001,7 +3035,7 @@ impl VirtualSession {
         stdin: Vec<u8>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
-        let rendered = tier2_text::tac(cwd, &args, stdin, |path| self.filesystem.read_file(path))?;
+        let rendered = tier2_text::tac(cwd, &args, stdin, |path| self.read_path(path))?;
         Ok(ExecutionResult::success(rendered, metadata))
     }
 
@@ -3012,8 +3046,7 @@ impl VirtualSession {
         stdin: Vec<u8>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
-        let rendered =
-            tier2_text::strings(cwd, &args, stdin, |path| self.filesystem.read_file(path))?;
+        let rendered = tier2_text::strings(cwd, &args, stdin, |path| self.read_path(path))?;
         Ok(ExecutionResult::success(rendered, metadata))
     }
 
@@ -3024,7 +3057,7 @@ impl VirtualSession {
         stdin: Vec<u8>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
-        let rendered = tier2_text::fold(cwd, &args, stdin, |path| self.filesystem.read_file(path))?;
+        let rendered = tier2_text::fold(cwd, &args, stdin, |path| self.read_path(path))?;
         Ok(ExecutionResult::success(rendered, metadata))
     }
 
@@ -3035,8 +3068,7 @@ impl VirtualSession {
         stdin: Vec<u8>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
-        let rendered =
-            tier2_text::expand(cwd, &args, stdin, |path| self.filesystem.read_file(path))?;
+        let rendered = tier2_text::expand(cwd, &args, stdin, |path| self.read_path(path))?;
         Ok(ExecutionResult::success(rendered, metadata))
     }
 
@@ -3047,8 +3079,7 @@ impl VirtualSession {
         stdin: Vec<u8>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
-        let rendered =
-            tier2_text::unexpand(cwd, &args, stdin, |path| self.filesystem.read_file(path))?;
+        let rendered = tier2_text::unexpand(cwd, &args, stdin, |path| self.read_path(path))?;
         Ok(ExecutionResult::success(rendered, metadata))
     }
 
@@ -3138,7 +3169,7 @@ impl VirtualSession {
                     if self.filesystem.is_dir(&descendant)? {
                         self.filesystem.mkdir(&target, true)?;
                     } else {
-                        let contents = self.filesystem.read_file(&descendant)?;
+                        let contents = self.read_path(&descendant)?;
                         self.filesystem.write_file(&target, contents, true)?;
                     }
                 }
@@ -3148,7 +3179,7 @@ impl VirtualSession {
                 } else {
                     spec.destination.clone()
                 };
-                let contents = self.filesystem.read_file(source)?;
+                let contents = self.read_path(source)?;
                 self.filesystem.write_file(&target, contents, false)?;
             }
         }
@@ -3216,7 +3247,7 @@ impl VirtualSession {
                     if self.filesystem.is_dir(&descendant)? {
                         self.filesystem.mkdir(&destination_path, true)?;
                     } else {
-                        let contents = self.filesystem.read_file(&descendant)?;
+                        let contents = self.read_path(&descendant)?;
                         self.filesystem
                             .write_file(&destination_path, contents, true)?;
                     }
@@ -3228,7 +3259,7 @@ impl VirtualSession {
                         "cannot overwrite directory with file: {target}"
                     )));
                 }
-                let contents = self.filesystem.read_file(source)?;
+                let contents = self.read_path(source)?;
                 self.filesystem.write_file(&target, contents, false)?;
                 self.filesystem.delete_path(source, false)?;
             }
@@ -3247,7 +3278,7 @@ impl VirtualSession {
         let spec = tee::parse_spec(cwd, &args)?;
         for path in spec.paths {
             let contents = if spec.append {
-                let mut existing = match self.filesystem.read_file(&path) {
+                let mut existing = match self.read_path(&path) {
                     Ok(bytes) => bytes,
                     Err(error) if error.kind() == abash_core::ErrorKind::InvalidRequest => {
                         Vec::new()
@@ -3315,7 +3346,7 @@ impl VirtualSession {
                 } else {
                     let resolved = resolve_sandbox_path(cwd, &plan.database)?;
                     if self.filesystem.exists(&resolved)? {
-                        Some(self.filesystem.read_file(&resolved)?)
+                        Some(self.read_path(&resolved)?)
                     } else {
                         None
                     }
@@ -3360,7 +3391,7 @@ impl VirtualSession {
 
         for path in &spec.paths {
             let resolved = resolve_sandbox_path(cwd, path)?;
-            let input = self.filesystem.read_file(&resolved)?;
+            let input = self.read_path(&resolved)?;
             let transformed = if spec.decompress {
                 gzipcmd::decompress_bytes(&input)?
             } else {
@@ -3539,7 +3570,7 @@ impl VirtualSession {
         args: Vec<String>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
-        let rendered = comm::execute(cwd, &args, |path| self.filesystem.read_file(path))?;
+        let rendered = comm::execute(cwd, &args, |path| self.read_path(path))?;
         Ok(ExecutionResult::success(rendered, metadata))
     }
 
@@ -3549,7 +3580,7 @@ impl VirtualSession {
         args: Vec<String>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
-        let diff = diffcmd::execute(cwd, &args, |path| self.filesystem.read_file(path))?;
+        let diff = diffcmd::execute(cwd, &args, |path| self.read_path(path))?;
         Ok(ExecutionResult {
             stdout: diff.output,
             stderr: Vec::new(),
@@ -3567,7 +3598,7 @@ impl VirtualSession {
         stdin: Vec<u8>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
-        let rendered = column::execute(cwd, &args, stdin, |path| self.filesystem.read_file(path))?;
+        let rendered = column::execute(cwd, &args, stdin, |path| self.read_path(path))?;
         Ok(ExecutionResult::success(rendered, metadata))
     }
 
@@ -3639,7 +3670,7 @@ impl VirtualSession {
     ) -> Result<ExecutionResult, SandboxError> {
         let spec = splitcmd::parse_spec(cwd, &args)?;
         let input = if let Some(path) = spec.input {
-            self.filesystem.read_file(&path)?
+            self.read_path(&path)?
         } else {
             stdin
         };
@@ -3665,7 +3696,7 @@ impl VirtualSession {
         stdin: Vec<u8>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
-        let rendered = odcmd::execute(cwd, &args, stdin, |path| self.filesystem.read_file(path))?;
+        let rendered = odcmd::execute(cwd, &args, stdin, |path| self.read_path(path))?;
         Ok(ExecutionResult::success(rendered, metadata))
     }
 
@@ -3676,8 +3707,7 @@ impl VirtualSession {
         stdin: Vec<u8>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
-        let rendered =
-            base64cmd::execute(cwd, &args, stdin, |path| self.filesystem.read_file(path))?;
+        let rendered = base64cmd::execute(cwd, &args, stdin, |path| self.read_path(path))?;
         Ok(ExecutionResult::success(rendered, metadata))
     }
 
@@ -3689,9 +3719,7 @@ impl VirtualSession {
         kind: hashcmd::HashKind,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
-        let rendered = hashcmd::execute(cwd, &args, stdin, kind, |path| {
-            self.filesystem.read_file(path)
-        })?;
+        let rendered = hashcmd::execute(cwd, &args, stdin, kind, |path| self.read_path(path))?;
         Ok(ExecutionResult::success(rendered, metadata))
     }
 
@@ -3706,7 +3734,7 @@ impl VirtualSession {
             cwd,
             &args,
             stdin,
-            |path| self.filesystem.read_file(path),
+            |path| self.read_path(path),
             || self.filesystem.list_paths(),
             |path| self.filesystem.is_dir(path),
         )?;
@@ -3733,7 +3761,7 @@ impl VirtualSession {
         let mut output = Vec::new();
         for path in args {
             let resolved = resolve_sandbox_path(cwd, path)?;
-            output.extend(self.filesystem.read_file(&resolved)?);
+            output.extend(self.read_path(&resolved)?);
         }
         Ok(output)
     }
@@ -3759,7 +3787,7 @@ impl VirtualSession {
         let mut columns = Vec::new();
         for path in args {
             let resolved = resolve_sandbox_path(cwd, path)?;
-            let contents = self.filesystem.read_file(&resolved)?;
+            let contents = self.read_path(&resolved)?;
             columns.push(
                 String::from_utf8(contents)
                     .map_err(|_| {
@@ -3783,7 +3811,7 @@ impl VirtualSession {
         delimiter: Option<char>,
     ) -> Result<Vec<JoinRow>, SandboxError> {
         let resolved = resolve_sandbox_path(cwd, path)?;
-        let contents = self.filesystem.read_file(&resolved)?;
+        let contents = self.read_path(&resolved)?;
         let text = String::from_utf8(contents).map_err(|_| {
             SandboxError::InvalidRequest("join currently requires UTF-8 text input".to_string())
         })?;
@@ -5026,6 +5054,7 @@ mod tests {
             exported_env: BTreeMap::new(),
             aliases: BTreeMap::new(),
             history: Vec::new(),
+            active_extensions: None,
         };
 
         let merge_into_file = parse_script("echo ok > /workspace/out.txt 2>&1").unwrap();

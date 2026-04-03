@@ -275,7 +275,7 @@ pub trait SessionBackend: Send {
         request: ExecutionRequest,
         config: &SandboxConfig,
         cancel_flag: &AtomicBool,
-        extensions: Option<&dyn SandboxExtensions>,
+        extensions: Option<Arc<dyn SandboxExtensions>>,
     ) -> Result<ExecutionResult, SandboxError>;
 
     fn read_file(&mut self, _path: &str) -> Result<Vec<u8>, SandboxError> {
@@ -323,6 +323,10 @@ pub trait SandboxExtensions: Send + Sync {
     ) -> Result<Option<ExecutionResult>, SandboxError> {
         Ok(None)
     }
+
+    fn read_lazy_file(&self, _path: &str) -> Result<Option<Vec<u8>>, SandboxError> {
+        Ok(None)
+    }
 }
 
 pub struct SandboxSession {
@@ -358,7 +362,7 @@ impl SandboxSession {
             request,
             &self.config,
             self.cancel_flag.as_ref(),
-            self.extensions.as_deref(),
+            self.extensions.clone(),
         ) {
             Ok(result) => result,
             Err(error) => ExecutionResult::failure(error, self.base_metadata()),

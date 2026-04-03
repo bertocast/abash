@@ -68,6 +68,7 @@ Command-name parity history is tracked in [docs/pending_commands.md](docs/pendin
 ## Workspace Policy
 
 - Host-backed modes can use legacy `workspace_root="/workspace"` or explicit `host_mounts=[HostMount(...)]`.
+- `lazy_file_providers={"/mount": callback}` can materialize file bytes on demand during command execution.
 - Writable roots still use sandbox paths, so multi-mount write policy stays explicit.
 - Path traversal outside the sandbox root is blocked.
 - Host-backed access outside configured mount paths is blocked.

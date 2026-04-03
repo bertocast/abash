@@ -292,6 +292,23 @@ def _wrap_custom_command_callback(
     return _bridge
 
 
+def _wrap_lazy_file_callback(
+    callbacks: dict[str, Callable[[str], str | bytes | None]] | None,
+) -> Callable[[str], str | bytes | None] | None:
+    if not callbacks:
+        return None
+
+    roots = sorted(callbacks, key=len, reverse=True)
+
+    def _bridge(path: str) -> str | bytes | None:
+        for root in roots:
+            if path == root or path.startswith(f"{root}/"):
+                return callbacks[root](path)
+        return None
+
+    return _bridge
+
+
 def _wrap_pre_exec_hook(
     callback: Callable[[ExecutionRequest], ExecutionRequest | None] | None,
 ) -> Callable[[dict[str, object]], dict[str, object] | None] | None:
@@ -395,6 +412,7 @@ class Bash:
             str, Callable[[ExecutionRequest], ExecutionResult | str | bytes]
         ]
         | None = None,
+        lazy_file_providers: dict[str, Callable[[str], str | bytes | None]] | None = None,
         pre_exec_hook: Callable[[ExecutionRequest], ExecutionRequest | None] | None = None,
         post_exec_hook: Callable[
             [ExecutionRequest, ExecutionResult], ExecutionResult | None
@@ -414,6 +432,7 @@ class Bash:
             event_callback=event_callback,
             audit_callback=audit_callback,
             custom_commands=dict(custom_commands or {}),
+            lazy_file_providers=dict(lazy_file_providers or {}),
             pre_exec_hook=pre_exec_hook,
             post_exec_hook=post_exec_hook,
         )
@@ -421,6 +440,7 @@ class Bash:
         self._event_callback_bridge = _wrap_event_callback(options.event_callback)
         self._audit_callback_bridge = _wrap_audit_callback(options.audit_callback)
         self._custom_command_bridge = _wrap_custom_command_callback(options.custom_commands)
+        self._lazy_file_bridge = _wrap_lazy_file_callback(options.lazy_file_providers)
         self._pre_exec_hook_bridge = _wrap_pre_exec_hook(options.pre_exec_hook)
         self._post_exec_hook_bridge = _wrap_post_exec_hook(options.post_exec_hook)
         self._native = NativeSandbox(
@@ -436,6 +456,8 @@ class Bash:
             self._audit_callback_bridge,
             sorted(options.custom_commands),
             self._custom_command_bridge,
+            sorted(options.lazy_file_providers),
+            self._lazy_file_bridge,
             self._pre_exec_hook_bridge,
             self._post_exec_hook_bridge,
         )
@@ -451,6 +473,7 @@ class Bash:
             event_callback=options.event_callback,
             audit_callback=options.audit_callback,
             custom_commands=dict(options.custom_commands),
+            lazy_file_providers=dict(options.lazy_file_providers),
             pre_exec_hook=options.pre_exec_hook,
             post_exec_hook=options.post_exec_hook,
         )
@@ -474,6 +497,7 @@ class Bash:
             str, Callable[[ExecutionRequest], ExecutionResult | str | bytes]
         ]
         | None = None,
+        lazy_file_providers: dict[str, Callable[[str], str | bytes | None]] | None = None,
         pre_exec_hook: Callable[[ExecutionRequest], ExecutionRequest | None] | None = None,
         post_exec_hook: Callable[
             [ExecutionRequest, ExecutionResult], ExecutionResult | None
@@ -492,6 +516,7 @@ class Bash:
             event_callback=event_callback,
             audit_callback=audit_callback,
             custom_commands=custom_commands,
+            lazy_file_providers=lazy_file_providers,
             pre_exec_hook=pre_exec_hook,
             post_exec_hook=post_exec_hook,
         )

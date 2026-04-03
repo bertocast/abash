@@ -45,6 +45,8 @@ impl NativeSandbox {
         audit_callback=None,
         custom_command_names=None,
         custom_command_callback=None,
+        lazy_mount_roots=None,
+        lazy_file_callback=None,
         pre_exec_hook=None,
         post_exec_hook=None
     ))]
@@ -61,6 +63,8 @@ impl NativeSandbox {
         audit_callback: Option<Py<PyAny>>,
         custom_command_names: Option<Vec<String>>,
         custom_command_callback: Option<Py<PyAny>>,
+        lazy_mount_roots: Option<Vec<String>>,
+        lazy_file_callback: Option<Py<PyAny>>,
         pre_exec_hook: Option<Py<PyAny>>,
         post_exec_hook: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
@@ -108,9 +112,16 @@ impl NativeSandbox {
             .unwrap_or_default()
             .into_iter()
             .collect::<BTreeSet<_>>();
+        let lazy_file_callback = lazy_file_callback.map(Arc::new);
+        let lazy_mount_roots = lazy_mount_roots
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
         let extensions = Some(Arc::new(PythonExtensions {
             custom_command_callback: custom_command_callback.clone(),
             custom_command_names: custom_command_names.clone(),
+            lazy_file_callback: lazy_file_callback.clone(),
+            lazy_mount_roots: lazy_mount_roots.clone(),
         }) as Arc<dyn abash_core::SandboxExtensions>);
         let session = Arc::new(Mutex::new(SandboxSession::new(
             config,
@@ -126,6 +137,8 @@ impl NativeSandbox {
                 audit_callback: audit_callback.map(Arc::new),
                 custom_command_callback,
                 custom_command_names,
+                lazy_file_callback,
+                lazy_mount_roots,
                 pre_exec_hook: pre_exec_hook.map(Arc::new),
                 post_exec_hook: post_exec_hook.map(Arc::new),
             },

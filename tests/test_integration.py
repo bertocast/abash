@@ -2089,6 +2089,25 @@ async def test_custom_commands_compose_inside_script_mode() -> None:
 
 
 @pytest.mark.anyio
+async def test_lazy_file_providers_support_command_time_reads() -> None:
+    seen: list[str] = []
+
+    def provider(path: str) -> str | None:
+        seen.append(path)
+        if path == "/lazy/report.txt":
+            return "team=core\nstatus=green\n"
+        return None
+
+    async with Bash(lazy_file_providers={"/lazy": provider}) as bash:
+        cat_result = await bash.exec(["cat", "/lazy/report.txt"])
+        grep_result = await bash.exec_script("grep core /lazy/report.txt | tail -n 1")
+
+    assert cat_result.stdout == "team=core\nstatus=green\n"
+    assert grep_result.stdout == "team=core\n"
+    assert seen.count("/lazy/report.txt") >= 2
+
+
+@pytest.mark.anyio
 async def test_exec_hooks_can_transform_requests_and_results() -> None:
     def pre_exec(request: ExecutionRequest) -> ExecutionRequest:
         request.argv = ["echo", "patched"]

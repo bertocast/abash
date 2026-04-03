@@ -25,6 +25,8 @@ pub struct RuntimeCallbacks {
     pub audit_callback: Option<Arc<Py<PyAny>>>,
     pub custom_command_callback: Option<Arc<Py<PyAny>>>,
     pub custom_command_names: std::collections::BTreeSet<String>,
+    pub lazy_file_callback: Option<Arc<Py<PyAny>>>,
+    pub lazy_mount_roots: std::collections::BTreeSet<String>,
     pub pre_exec_hook: Option<Arc<Py<PyAny>>>,
     pub post_exec_hook: Option<Arc<Py<PyAny>>>,
 }
@@ -33,6 +35,8 @@ pub struct RuntimeCallbacks {
 pub struct PythonExtensions {
     pub custom_command_callback: Option<Arc<Py<PyAny>>>,
     pub custom_command_names: std::collections::BTreeSet<String>,
+    pub lazy_file_callback: Option<Arc<Py<PyAny>>>,
+    pub lazy_mount_roots: std::collections::BTreeSet<String>,
 }
 
 impl SandboxExtensions for PythonExtensions {
@@ -67,6 +71,40 @@ impl SandboxExtensions for PythonExtensions {
                 .entry("command".to_string())
                 .or_insert_with(|| command.clone());
             Ok(Some(result))
+        })
+    }
+
+    fn read_lazy_file(&self, path: &str) -> Result<Option<Vec<u8>>, SandboxError> {
+        if !self
+            .lazy_mount_roots
+            .iter()
+            .any(|root| path == root || path.starts_with(&format!("{root}/")))
+        {
+            return Ok(None);
+        }
+        let Some(callback) = self.lazy_file_callback.as_ref() else {
+            return Ok(None);
+        };
+        Python::with_gil(|py| -> Result<Option<Vec<u8>>, SandboxError> {
+            let payload = callback
+                .bind(py)
+                .call1((path,))
+                .map_err(python_callback_error)?;
+            if payload.is_none() {
+                return Ok(None);
+            }
+            if let Ok(bytes) = payload.extract::<Vec<u8>>() {
+                return Ok(Some(bytes));
+            }
+            if let Ok(text) = payload.extract::<String>() {
+                return Ok(Some(text.into_bytes()));
+            }
+            Err(python_callback_error(PyErr::new::<
+                pyo3::exceptions::PyTypeError,
+                _,
+            >(
+                "lazy file provider must return bytes, str, or None",
+            )))
         })
     }
 }
@@ -443,6 +481,8 @@ impl SandboxRuntime {
                 audit_callback: self.callbacks.audit_callback.clone(),
                 custom_command_callback: self.callbacks.custom_command_callback.clone(),
                 custom_command_names: self.callbacks.custom_command_names.clone(),
+                lazy_file_callback: self.callbacks.lazy_file_callback.clone(),
+                lazy_mount_roots: self.callbacks.lazy_mount_roots.clone(),
                 pre_exec_hook: self.callbacks.pre_exec_hook.clone(),
                 post_exec_hook: self.callbacks.post_exec_hook.clone(),
             },
@@ -541,6 +581,8 @@ impl ThreadRuntime {
         let extensions = PythonExtensions {
             custom_command_callback: self.callbacks.custom_command_callback.clone(),
             custom_command_names: self.callbacks.custom_command_names.clone(),
+            lazy_file_callback: self.callbacks.lazy_file_callback.clone(),
+            lazy_mount_roots: self.callbacks.lazy_mount_roots.clone(),
         };
         let mut result = match extensions.exec_custom_command(request)? {
             Some(result) => result,
