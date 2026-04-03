@@ -100,6 +100,7 @@ class ExecutionRequest:
     script: str | None = None
     cwd: str | None = None
     env: dict[str, str] = field(default_factory=dict)
+    replace_env: bool = False
     stdin: bytes | str | None = None
     timeout_ms: int | None = None
     filesystem_mode: FilesystemMode | None = None

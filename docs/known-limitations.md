@@ -14,6 +14,7 @@
 - custom commands can run inside script dispatch now, but hooks still only apply at the top-level request boundary; AST rewrite plugins and richer custom-command context objects are still out of scope
 - pipeline execution is buffered and sequential rather than streaming or process-concurrent
 - shell state defaults to session-persistent behavior; `session_state="per_exec"` resets `cwd`, exported env, aliases, and history between calls, but filesystem contents remain shared
+- `replace_env=True` only affects the current request's env merge; it does not undo persisted `export` state for later calls
 - variable support is limited to explicit request env, `export`, and command-local assignments; there is no general persistent shell variable state beyond exported env
 - globbing is limited to script arguments; command names, redirection targets, and argv mode stay literal
 - control flow is limited to minimal `if ... then ... [elif] ... [else] ... fi`, `while ... do ... done`, `until ... do ... done`, `for ... do ... done`, and narrow functions; `case`, `return`, `break`, and `continue` are still unsupported

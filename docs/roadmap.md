@@ -89,6 +89,7 @@ Current `abash` state:
 
 - session-persistent shell state by default
 - opt-in `session_state="per_exec"` for reset semantics
+- per-call `replace_env=True` for request-env-only execution
 
 Current `just-bash` shape:
 
@@ -98,8 +99,7 @@ Current `just-bash` shape:
 Recommended work:
 
 1. keep the current default unless product direction changes
-2. consider adding narrow convenience flags comparable to `replaceEnv`
-3. only revisit the default if strong user demand shows up
+2. only revisit the default if strong user demand shows up
 
 Why fourth:
 

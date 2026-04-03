@@ -154,6 +154,7 @@ pub struct ExecutionRequest {
     pub script: Option<String>,
     pub cwd: String,
     pub env: BTreeMap<String, String>,
+    pub replace_env: bool,
     pub stdin: Vec<u8>,
     pub timeout_ms: Option<u64>,
     pub network_enabled: bool,

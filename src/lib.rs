@@ -148,7 +148,7 @@ impl NativeSandbox {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (mode, argv=None, script=None, cwd=None, env=None, stdin=None, timeout_ms=None, metadata=None, network_enabled=None, filesystem_mode=None))]
+    #[pyo3(signature = (mode, argv=None, script=None, cwd=None, env=None, replace_env=None, stdin=None, timeout_ms=None, metadata=None, network_enabled=None, filesystem_mode=None))]
     fn run(
         &self,
         py: Python<'_>,
@@ -157,6 +157,7 @@ impl NativeSandbox {
         script: Option<String>,
         cwd: Option<String>,
         env: Option<BTreeMap<String, String>>,
+        replace_env: Option<bool>,
         stdin: Option<Vec<u8>>,
         timeout_ms: Option<u64>,
         metadata: Option<BTreeMap<String, String>>,
@@ -169,6 +170,7 @@ impl NativeSandbox {
             script,
             cwd,
             env,
+            replace_env,
             stdin,
             timeout_ms,
             metadata,
@@ -181,7 +183,7 @@ impl NativeSandbox {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (mode, argv=None, script=None, cwd=None, env=None, stdin=None, timeout_ms=None, metadata=None, network_enabled=None, filesystem_mode=None))]
+    #[pyo3(signature = (mode, argv=None, script=None, cwd=None, env=None, replace_env=None, stdin=None, timeout_ms=None, metadata=None, network_enabled=None, filesystem_mode=None))]
     fn exec_detached(
         &self,
         py: Python<'_>,
@@ -190,6 +192,7 @@ impl NativeSandbox {
         script: Option<String>,
         cwd: Option<String>,
         env: Option<BTreeMap<String, String>>,
+        replace_env: Option<bool>,
         stdin: Option<Vec<u8>>,
         timeout_ms: Option<u64>,
         metadata: Option<BTreeMap<String, String>>,
@@ -202,6 +205,7 @@ impl NativeSandbox {
             script,
             cwd,
             env,
+            replace_env,
             stdin,
             timeout_ms,
             metadata,
@@ -441,6 +445,7 @@ pub(crate) fn execution_request_to_python(
     payload.set_item("script", request.script.clone())?;
     payload.set_item("cwd", request.cwd.clone())?;
     payload.set_item("env", request.env.clone())?;
+    payload.set_item("replace_env", request.replace_env)?;
     payload.set_item("stdin", PyBytes::new_bound(py, &request.stdin))?;
     payload.set_item("timeout_ms", request.timeout_ms)?;
     payload.set_item("network_enabled", request.network_enabled)?;
@@ -477,6 +482,7 @@ fn build_request(
     script: Option<String>,
     cwd: Option<String>,
     env: Option<BTreeMap<String, String>>,
+    replace_env: Option<bool>,
     stdin: Option<Vec<u8>>,
     timeout_ms: Option<u64>,
     metadata: Option<BTreeMap<String, String>>,
@@ -489,6 +495,7 @@ fn build_request(
         script,
         cwd: cwd.unwrap_or_default(),
         env: env.unwrap_or_default(),
+        replace_env: replace_env.unwrap_or(false),
         stdin: stdin.unwrap_or_default(),
         timeout_ms,
         network_enabled: network_enabled.unwrap_or(false),
@@ -591,6 +598,10 @@ pub(crate) fn python_to_execution_request(
         env: payload
             .get_item("env")?
             .extract::<BTreeMap<String, String>>()?,
+        replace_env: payload
+            .get_item("replace_env")?
+            .extract::<Option<bool>>()?
+            .unwrap_or(false),
         stdin,
         timeout_ms: payload.get_item("timeout_ms")?.extract::<Option<u64>>()?,
         network_enabled: payload

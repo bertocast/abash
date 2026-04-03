@@ -91,6 +91,7 @@ Command-name parity history is tracked in [docs/pending_commands.md](docs/pendin
 - Output is buffered; there is no live streaming guarantee in Phase 4 v1.
 - Only one active run is allowed per `Bash` session.
 - `Bash(session_state="per_exec")` opts into `just-bash`-style shell-state reset between calls while keeping the filesystem shared.
+- `replace_env=True` opts one call into request-env-only execution without clearing persisted shell state globally.
 
 ## Extension Surface
 

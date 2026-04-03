@@ -2366,6 +2366,21 @@ async def test_per_exec_session_state_resets_shell_state_between_calls() -> None
 
 
 @pytest.mark.anyio
+async def test_replace_env_ignores_persisted_exports_for_one_call() -> None:
+    async with Bash() as bash:
+        await bash.exec(["export", "TEAM=core"])
+        merged = await bash.exec(["printenv", "TEAM", "MODE"], env={"MODE": "debug"})
+        replaced = await bash.exec(
+            ["printenv", "TEAM", "MODE"],
+            env={"MODE": "debug"},
+            replace_env=True,
+        )
+
+    assert merged.stdout == "core\ndebug\n"
+    assert replaced.stdout == "debug\n"
+
+
+@pytest.mark.anyio
 async def test_tier3_alias_and_identity_commands_work() -> None:
     async with Bash() as bash:
         await bash.write_file("/workspace/demo.txt", "hello")

@@ -140,6 +140,7 @@ impl SessionBackend for VirtualSession {
             persisted_cwd,
             exported_env,
             request.env.clone(),
+            request.replace_env,
             aliases,
             request.argv.clone(),
         );
@@ -863,6 +864,7 @@ impl VirtualSession {
                 script: None,
                 cwd: cwd.to_string(),
                 env: env.clone(),
+                replace_env: false,
                 stdin: stdin.clone(),
                 timeout_ms,
                 network_enabled,
@@ -3886,11 +3888,17 @@ impl RuntimeState {
         persisted_cwd: String,
         exported_env: BTreeMap<String, String>,
         request_env: BTreeMap<String, String>,
+        replace_env: bool,
         aliases: BTreeMap<String, Vec<String>>,
         positional_args: Vec<String>,
     ) -> Self {
-        let mut env = exported_env.clone();
-        env.extend(request_env);
+        let env = if replace_env {
+            request_env
+        } else {
+            let mut env = exported_env.clone();
+            env.extend(request_env);
+            env
+        };
         Self {
             cwd,
             persisted_cwd,
@@ -4877,6 +4885,7 @@ mod tests {
             script: None,
             cwd: "/".to_string(),
             env: BTreeMap::new(),
+            replace_env: false,
             stdin: Vec::new(),
             timeout_ms: None,
             network_enabled: false,
@@ -4900,6 +4909,7 @@ mod tests {
             script: None,
             cwd: "/".to_string(),
             env: BTreeMap::new(),
+            replace_env: false,
             stdin: Vec::new(),
             timeout_ms: Some(1),
             network_enabled: false,
@@ -4922,6 +4932,7 @@ mod tests {
                     script: None,
                     cwd: "/".to_string(),
                     env: BTreeMap::new(),
+                    replace_env: false,
                     stdin: Vec::new(),
                     timeout_ms: Some(1_000),
                     network_enabled: false,
@@ -4952,6 +4963,7 @@ mod tests {
             script: None,
             cwd: "/".to_string(),
             env: BTreeMap::new(),
+            replace_env: false,
             stdin: Vec::new(),
             timeout_ms: None,
             network_enabled: false,
@@ -4966,6 +4978,7 @@ mod tests {
             script: None,
             cwd: "/".to_string(),
             env: BTreeMap::new(),
+            replace_env: false,
             stdin: Vec::new(),
             timeout_ms: None,
             network_enabled: false,
@@ -4980,6 +4993,7 @@ mod tests {
             script: None,
             cwd: "/".to_string(),
             env: BTreeMap::new(),
+            replace_env: false,
             stdin: Vec::new(),
             timeout_ms: None,
             network_enabled: false,
@@ -5018,6 +5032,7 @@ mod tests {
             script: None,
             cwd: "/workspace".to_string(),
             env: BTreeMap::new(),
+            replace_env: false,
             stdin: Vec::new(),
             timeout_ms: None,
             network_enabled: false,

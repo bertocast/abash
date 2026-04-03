@@ -21,6 +21,7 @@
 - narrow lazy file-provider hooks for command-time direct reads
 - scoped writable roots for `host_readwrite`
 - opt-in `session_state="per_exec"` shell-state reset between calls
+- per-call `replace_env=True` request-env replacement
 
 ## Script Compatibility Matrix
 
