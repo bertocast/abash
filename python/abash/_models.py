@@ -94,6 +94,20 @@ class HostMount:
 
 
 @dataclass(slots=True)
+class LazyPathEntry:
+    path: str
+    is_dir: bool = False
+
+
+@dataclass(slots=True)
+class LazyMountProvider:
+    read_file: Callable[[str], str | bytes | None]
+    list_paths: Callable[[], list[str | LazyPathEntry] | tuple[str | LazyPathEntry, ...]] | None = (
+        None
+    )
+
+
+@dataclass(slots=True)
 class ExecutionRequest:
     mode: ExecutionMode = ExecutionMode.ARGV
     argv: list[str] | None = None
@@ -144,9 +158,10 @@ class BashOptions:
             "ExecutionResult | str | bytes | DelegatedExecution",
         ],
     ] = field(default_factory=dict)
-    lazy_file_providers: dict[str, Callable[[str], str | bytes | None]] = field(
-        default_factory=dict
-    )
+    lazy_file_providers: dict[
+        str,
+        Callable[[str], str | bytes | None] | LazyMountProvider,
+    ] = field(default_factory=dict)
     pre_exec_hook: Callable[["ExecutionRequest"], "ExecutionRequest | None"] | None = None
     post_exec_hook: Callable[
         ["ExecutionRequest", "ExecutionResult"], "ExecutionResult | None"

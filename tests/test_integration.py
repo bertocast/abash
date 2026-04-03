@@ -23,6 +23,8 @@ from abash import (
     ExecutionResult,
     FilesystemMode,
     HostMount,
+    LazyMountProvider,
+    LazyPathEntry,
     NetworkOrigin,
     NetworkPolicy,
     RunStatus,
@@ -2167,6 +2169,39 @@ async def test_lazy_file_providers_support_command_time_reads() -> None:
     assert cat_result.stdout == "team=core\nstatus=green\n"
     assert grep_result.stdout == "team=core\n"
     assert seen.count("/lazy/report.txt") >= 2
+
+
+@pytest.mark.anyio
+async def test_lazy_listing_providers_support_directory_ops_and_helpers() -> None:
+    def read_file(path: str) -> str | None:
+        if path == "/lazy/docs/report.txt":
+            return "team=core\n"
+        return None
+
+    provider = LazyMountProvider(
+        read_file=read_file,
+        list_paths=lambda: [
+            LazyPathEntry("docs", is_dir=True),
+            LazyPathEntry("docs/report.txt"),
+            "logs/",
+        ],
+    )
+
+    async with Bash(lazy_file_providers={"/lazy": provider}) as bash:
+        find_result = await bash.exec(["find", "/lazy", "-type", "f"])
+        ls_result = await bash.exec(["ls", "/lazy"])
+        tree_result = await bash.exec(["tree", "/lazy"])
+        exists_file = await bash.exists("/lazy/docs/report.txt")
+        exists_dir = await bash.exists("/lazy/logs")
+        contents = await bash.read_file("/lazy/docs/report.txt")
+
+    assert find_result.stdout == "/lazy/docs/report.txt\n"
+    assert ls_result.stdout == "docs\nlogs\n"
+    assert "report.txt" in tree_result.stdout
+    assert "logs" in tree_result.stdout
+    assert exists_file is True
+    assert exists_dir is True
+    assert contents == "team=core\n"
 
 
 @pytest.mark.anyio

@@ -18,7 +18,7 @@
 - host-side custom command registration for argv mode and script-internal command dispatch, optional `CustomCommandContext`, delegated nested exec helpers, plus top-level pre/post execution hooks
 - filesystem session persistence for `memory` and `host_cow`
 - host-backed workspace modes with one legacy `/workspace` mount or explicit multi-mount configuration
-- narrow lazy file-provider hooks for command-time direct reads
+- lazy file-provider hooks for direct reads plus optional listing-backed `find` / `ls` / `tree` / helper visibility
 - scoped writable roots for `host_readwrite`
 - opt-in `session_state="per_exec"` shell-state reset between calls
 - per-call `replace_env=True` request-env replacement

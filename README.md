@@ -69,6 +69,7 @@ Command-name parity history is tracked in [docs/pending_commands.md](docs/pendin
 
 - Host-backed modes can use legacy `workspace_root="/workspace"` or explicit `host_mounts=[HostMount(...)]`.
 - `lazy_file_providers={"/mount": callback}` can materialize file bytes on demand during command execution.
+- `lazy_file_providers={"/mount": LazyMountProvider(...)}` can also publish listing metadata so `find`, `ls`, `tree`, `exists()`, and `read_file()` see provider-backed paths.
 - Writable roots still use sandbox paths, so multi-mount write policy stays explicit.
 - Path traversal outside the sandbox root is blocked.
 - Host-backed access outside configured mount paths is blocked.
@@ -113,11 +114,12 @@ Command-name parity history is tracked in [docs/pending_commands.md](docs/pendin
 
 ## Current Limitations
 
-- multi-mount filesystem composition is not part of the current product line
+- broader mount adapter abstractions still stay outside the main product line; explicit `host_mounts=[HostMount(...)]` is the supported host model
 - unrestricted network access remains unavailable by design
 - detached runs are in-process only and do not survive interpreter or process restart
 - stdout/stderr are still surfaced as buffered event chunks rather than byte-streamed process pipes
 - detached runs can queue, but shell mutation still serializes through one session lock
+- `host_cow` still does not support deleting host-backed paths or whiteout semantics
 - script compatibility is intentionally narrow and not full bash parity
 - the `nsjail` backend is reserved for later Linux integration and currently returns explicit unsupported errors
 

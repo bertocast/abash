@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -54,8 +54,8 @@ mod yq;
 
 use abash_core::{
     create_filesystem, resolve_sandbox_path, ExecutionMode, ExecutionRequest, ExecutionResult,
-    ExtensionCommandResult, FilesystemMode, SandboxConfig, SandboxError, SandboxExtensions,
-    SandboxFilesystem, SessionBackend, SessionState, TerminationReason,
+    ExtensionCommandResult, FilesystemMode, LazyPathEntry, SandboxConfig, SandboxError,
+    SandboxExtensions, SandboxFilesystem, SessionBackend, SessionState, TerminationReason,
 };
 use script::{
     is_valid_assignment_name, parse_script, ChainOp, ForBlock, FunctionDef, IfBlock, Pipeline,
@@ -86,6 +86,48 @@ struct VirtualSession {
     aliases: BTreeMap<String, Vec<String>>,
     history: Vec<String>,
     active_extensions: Option<Arc<dyn SandboxExtensions>>,
+}
+
+#[derive(Default)]
+struct LazyPathSnapshot {
+    files: BTreeSet<String>,
+    dirs: BTreeSet<String>,
+}
+
+impl LazyPathSnapshot {
+    fn from_entries(entries: Vec<LazyPathEntry>) -> Result<Self, SandboxError> {
+        let mut snapshot = Self::default();
+        for entry in entries {
+            let path = abash_core::normalize_sandbox_path(&entry.path)?;
+            if entry.is_dir {
+                snapshot.dirs.insert(path.clone());
+            } else {
+                snapshot.files.insert(path.clone());
+            }
+            for parent in parent_directory_chain(&path) {
+                snapshot.dirs.insert(parent);
+            }
+        }
+        Ok(snapshot)
+    }
+
+    fn exists(&self, path: &str) -> bool {
+        self.files.contains(path) || self.dirs.contains(path)
+    }
+
+    fn is_dir(&self, path: &str) -> bool {
+        self.dirs.contains(path)
+    }
+
+    fn list_paths(&self) -> Vec<String> {
+        self.files
+            .iter()
+            .chain(self.dirs.iter())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
 }
 
 impl SessionBackend for VirtualSession {
@@ -198,11 +240,46 @@ impl SessionBackend for VirtualSession {
     }
 
     fn exists(&mut self, path: &str) -> Result<bool, SandboxError> {
-        self.filesystem.exists(path)
+        self.path_exists(path)
     }
 }
 
 impl VirtualSession {
+    fn lazy_snapshot(&self) -> Result<LazyPathSnapshot, SandboxError> {
+        let Some(extensions) = self.active_extensions.as_deref() else {
+            return Ok(LazyPathSnapshot::default());
+        };
+        LazyPathSnapshot::from_entries(extensions.list_lazy_paths()?)
+    }
+
+    fn list_paths(&self) -> Result<Vec<String>, SandboxError> {
+        let mut paths = self.filesystem.list_paths()?;
+        paths.extend(self.lazy_snapshot()?.list_paths());
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
+    fn path_exists(&self, path: &str) -> Result<bool, SandboxError> {
+        match self.filesystem.exists(path) {
+            Ok(true) => Ok(true),
+            Ok(false) | Err(SandboxError::InvalidRequest(_)) => {
+                Ok(self.lazy_snapshot()?.exists(path))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn path_is_dir(&self, path: &str) -> Result<bool, SandboxError> {
+        match self.filesystem.is_dir(path) {
+            Ok(true) => Ok(true),
+            Ok(false) | Err(SandboxError::InvalidRequest(_)) => {
+                Ok(self.lazy_snapshot()?.is_dir(path))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn read_path(&self, path: &str) -> Result<Vec<u8>, SandboxError> {
         match self.filesystem.read_file(path) {
             Ok(contents) => Ok(contents),
@@ -1440,7 +1517,7 @@ impl VirtualSession {
 
     fn expand_globs(&self, cwd: &str, args: Vec<String>) -> Result<Vec<String>, SandboxError> {
         let mut expanded = Vec::new();
-        let candidates = self.filesystem.list_paths()?;
+        let candidates = self.list_paths()?;
 
         for arg in args {
             if !contains_glob_pattern(&arg) {
@@ -1491,7 +1568,7 @@ impl VirtualSession {
         }
 
         let mut expanded = Vec::new();
-        let candidates = self.filesystem.list_paths()?;
+        let candidates = self.list_paths()?;
         let mut literal_next = false;
         let mut rg_pattern_consumed = command_name != "rg";
         let mut grep_pattern_consumed =
@@ -1641,7 +1718,7 @@ impl VirtualSession {
         let Some(subcommand) = args.first() else {
             return Ok(Vec::new());
         };
-        let candidates = self.filesystem.list_paths()?;
+        let candidates = self.list_paths()?;
         let mut expanded = vec![subcommand.clone()];
         let mut literal_next = false;
         let mut positional_consumed = 0usize;
@@ -2261,8 +2338,8 @@ impl VirtualSession {
             &args,
             stdin,
             |path| self.read_path(path),
-            || self.filesystem.list_paths(),
-            |path| self.filesystem.is_dir(path),
+            || self.list_paths(),
+            |path| self.path_is_dir(path),
         )?;
         Ok(ExecutionResult {
             stdout: result.output,
@@ -2782,8 +2859,8 @@ impl VirtualSession {
         let rendered = find::execute(
             cwd,
             &args,
-            || self.filesystem.list_paths(),
-            |path| self.filesystem.is_dir(path),
+            || self.list_paths(),
+            |path| self.path_is_dir(path),
         )?;
         Ok(ExecutionResult::success(rendered, metadata))
     }
@@ -2797,8 +2874,8 @@ impl VirtualSession {
         let rendered = ls::execute(
             cwd,
             &args,
-            || self.filesystem.list_paths(),
-            |path| self.filesystem.is_dir(path),
+            || self.list_paths(),
+            |path| self.path_is_dir(path),
         )?;
         Ok(ExecutionResult::success(rendered, metadata))
     }
@@ -2812,8 +2889,8 @@ impl VirtualSession {
         let rendered = tier2_files::tree(
             cwd,
             &args,
-            || self.filesystem.list_paths(),
-            |path| self.filesystem.is_dir(path),
+            || self.list_paths(),
+            |path| self.path_is_dir(path),
         )?;
         Ok(ExecutionResult::success(rendered, metadata))
     }
@@ -2824,12 +2901,12 @@ impl VirtualSession {
         args: Vec<String>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
-        let candidates = self.filesystem.list_paths()?;
+        let candidates = self.list_paths()?;
         let rendered = tier2_files::stat(
             cwd,
             &args,
             |path| self.read_path(path),
-            |path| self.filesystem.is_dir(path),
+            |path| self.path_is_dir(path),
             |path| self.filesystem.get_mode_bits(path),
             |path| self.filesystem.read_link(path),
             &candidates,
@@ -2843,13 +2920,13 @@ impl VirtualSession {
         args: Vec<String>,
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
-        let candidates = self.filesystem.list_paths()?;
+        let candidates = self.list_paths()?;
         let result = ducmd::execute(
             cwd,
             &args,
-            |path| self.filesystem.exists(path),
+            |path| self.path_exists(path),
             |path| self.read_path(path),
-            |path| self.filesystem.is_dir(path),
+            |path| self.path_is_dir(path),
             &candidates,
         )?;
         Ok(ExecutionResult {
@@ -2890,11 +2967,11 @@ impl VirtualSession {
         let mut stdout = String::new();
         let mut stderr = String::new();
         let mut exit_code = 0;
-        let mut candidates = self.filesystem.list_paths()?;
+        let mut candidates = self.list_paths()?;
         candidates.sort();
 
         for target in &spec.targets {
-            if !self.filesystem.exists(target)? {
+            if !self.path_exists(target)? {
                 exit_code = 1;
                 stderr.push_str(&format!(
                     "chmod: cannot access '{}': No such file or directory\n",
@@ -2904,7 +2981,7 @@ impl VirtualSession {
             }
 
             let mut paths = vec![target.clone()];
-            if spec.recursive && self.filesystem.is_dir(target)? {
+            if spec.recursive && self.path_is_dir(target)? {
                 paths.extend(chmodcmd::descendant_targets(target, &candidates));
             }
 
@@ -2982,7 +3059,7 @@ impl VirtualSession {
             cwd,
             &args,
             |path| self.read_path(path),
-            |path| self.filesystem.is_dir(path),
+            |path| self.path_is_dir(path),
             |path| self.filesystem.read_link(path),
         )?;
         Ok(ExecutionResult::success(rendered, metadata))
@@ -3009,7 +3086,7 @@ impl VirtualSession {
             Err(error) => return Ok(ln_error_result(error.to_string(), metadata)),
         };
 
-        if self.filesystem.exists(&spec.link_path)? {
+        if self.path_exists(&spec.link_path)? {
             if spec.force {
                 if let Err(error) = self.filesystem.delete_path(&spec.link_path, false) {
                     return Ok(ln_error_result(
@@ -3131,7 +3208,7 @@ impl VirtualSession {
     ) -> Result<ExecutionResult, SandboxError> {
         let spec = rm::parse_spec(cwd, &args)?;
         for path in spec.paths {
-            if !self.filesystem.exists(&path)? {
+            if !self.path_exists(&path)? {
                 if spec.force {
                     continue;
                 }
@@ -3140,7 +3217,7 @@ impl VirtualSession {
                 )));
             }
 
-            if self.filesystem.is_dir(&path)? && !spec.recursive {
+            if self.path_is_dir(&path)? && !spec.recursive {
                 return Err(SandboxError::InvalidRequest(format!(
                     "cannot remove directory without -r: {path}"
                 )));
@@ -3159,8 +3236,8 @@ impl VirtualSession {
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
         let spec = cp::parse_spec(cwd, &args)?;
-        let destination_exists = self.filesystem.exists(&spec.destination)?;
-        let destination_is_dir = destination_exists && self.filesystem.is_dir(&spec.destination)?;
+        let destination_exists = self.path_exists(&spec.destination)?;
+        let destination_is_dir = destination_exists && self.path_is_dir(&spec.destination)?;
 
         if spec.sources.len() > 1 && !destination_is_dir {
             return Err(SandboxError::InvalidRequest(
@@ -3168,15 +3245,15 @@ impl VirtualSession {
             ));
         }
 
-        let snapshot = self.filesystem.list_paths()?;
+        let snapshot = self.list_paths()?;
         for source in &spec.sources {
-            if !self.filesystem.exists(source)? {
+            if !self.path_exists(source)? {
                 return Err(SandboxError::InvalidRequest(format!(
                     "path does not exist: {source}"
                 )));
             }
 
-            if self.filesystem.is_dir(source)? {
+            if self.path_is_dir(source)? {
                 if !spec.recursive {
                     return Err(SandboxError::InvalidRequest(format!(
                         "cannot copy directory without -r: {source}"
@@ -3206,7 +3283,7 @@ impl VirtualSession {
                         .strip_prefix(&(source.to_string() + "/"))
                         .expect("descendant prefix checked");
                     let target = cp::join_path(&target_root, suffix);
-                    if self.filesystem.is_dir(&descendant)? {
+                    if self.path_is_dir(&descendant)? {
                         self.filesystem.mkdir(&target, true)?;
                     } else {
                         let contents = self.read_path(&descendant)?;
@@ -3234,8 +3311,8 @@ impl VirtualSession {
         metadata: BTreeMap<String, String>,
     ) -> Result<ExecutionResult, SandboxError> {
         let spec = mv::parse_spec(cwd, &args)?;
-        let destination_exists = self.filesystem.exists(&spec.destination)?;
-        let destination_is_dir = destination_exists && self.filesystem.is_dir(&spec.destination)?;
+        let destination_exists = self.path_exists(&spec.destination)?;
+        let destination_is_dir = destination_exists && self.path_is_dir(&spec.destination)?;
 
         if spec.sources.len() > 1 && !destination_is_dir {
             return Err(SandboxError::InvalidRequest(
@@ -3243,15 +3320,15 @@ impl VirtualSession {
             ));
         }
 
-        let snapshot = self.filesystem.list_paths()?;
+        let snapshot = self.list_paths()?;
         for source in &spec.sources {
-            if !self.filesystem.exists(source)? {
+            if !self.path_exists(source)? {
                 return Err(SandboxError::InvalidRequest(format!(
                     "path does not exist: {source}"
                 )));
             }
 
-            let source_is_dir = self.filesystem.is_dir(source)?;
+            let source_is_dir = self.path_is_dir(source)?;
             let target = if destination_is_dir {
                 cp::join_path(&spec.destination, cp::path_basename(source)?)
             } else {
@@ -3269,8 +3346,8 @@ impl VirtualSession {
             }
 
             if source_is_dir {
-                let target_exists = self.filesystem.exists(&target)?;
-                if target_exists && !self.filesystem.is_dir(&target)? {
+                let target_exists = self.path_exists(&target)?;
+                if target_exists && !self.path_is_dir(&target)? {
                     return Err(SandboxError::InvalidRequest(format!(
                         "cannot overwrite non-directory with directory: {target}"
                     )));
@@ -3284,7 +3361,7 @@ impl VirtualSession {
                         .strip_prefix(&(source.to_string() + "/"))
                         .expect("descendant prefix checked");
                     let destination_path = cp::join_path(&target, suffix);
-                    if self.filesystem.is_dir(&descendant)? {
+                    if self.path_is_dir(&descendant)? {
                         self.filesystem.mkdir(&destination_path, true)?;
                     } else {
                         let contents = self.read_path(&descendant)?;
@@ -3294,7 +3371,7 @@ impl VirtualSession {
                 }
                 self.filesystem.delete_path(source, true)?;
             } else {
-                if self.filesystem.exists(&target)? && self.filesystem.is_dir(&target)? {
+                if self.path_exists(&target)? && self.path_is_dir(&target)? {
                     return Err(SandboxError::InvalidRequest(format!(
                         "cannot overwrite directory with file: {target}"
                     )));
@@ -3385,7 +3462,7 @@ impl VirtualSession {
                     None
                 } else {
                     let resolved = resolve_sandbox_path(cwd, &plan.database)?;
-                    if self.filesystem.exists(&resolved)? {
+                    if self.path_exists(&resolved)? {
                         Some(self.read_path(&resolved)?)
                     } else {
                         None
@@ -3449,7 +3526,7 @@ impl VirtualSession {
                 gzipcmd::compressed_path(path, &spec.suffix)?
             };
             let resolved_target = resolve_sandbox_path(cwd, &target)?;
-            if self.filesystem.exists(&resolved_target)? && !spec.force {
+            if self.path_exists(&resolved_target)? && !spec.force {
                 exit_code = 1;
                 stderr.extend_from_slice(
                     format!("gzip: target already exists: {target}\n").as_bytes(),
@@ -3548,17 +3625,17 @@ impl VirtualSession {
     ) -> Result<ExecutionResult, SandboxError> {
         let spec = rmdir::parse_spec(cwd, &args)?;
         for path in spec.paths {
-            if !self.filesystem.exists(&path)? {
+            if !self.path_exists(&path)? {
                 return Err(SandboxError::InvalidRequest(format!(
                     "path does not exist: {path}"
                 )));
             }
-            if !self.filesystem.is_dir(&path)? {
+            if !self.path_is_dir(&path)? {
                 return Err(SandboxError::InvalidRequest(format!(
                     "rmdir requires a directory path: {path}"
                 )));
             }
-            if !directory_is_empty(&path, &self.filesystem.list_paths()?) {
+            if !directory_is_empty(&path, &self.list_paths()?) {
                 return Err(SandboxError::InvalidRequest(format!(
                     "directory is not empty: {path}"
                 )));
@@ -3568,10 +3645,10 @@ impl VirtualSession {
             if spec.parents {
                 let mut current = rmdir::parent_path(&path);
                 while let Some(parent) = current {
-                    if !self.filesystem.exists(&parent)? || !self.filesystem.is_dir(&parent)? {
+                    if !self.path_exists(&parent)? || !self.path_is_dir(&parent)? {
                         break;
                     }
-                    if !directory_is_empty(&parent, &self.filesystem.list_paths()?) {
+                    if !directory_is_empty(&parent, &self.list_paths()?) {
                         break;
                     }
                     if self.filesystem.delete_path(&parent, true).is_err() {
@@ -3597,7 +3674,7 @@ impl VirtualSession {
         }
         for path in args {
             let resolved = resolve_sandbox_path(cwd, &path)?;
-            if !self.filesystem.exists(&resolved)? {
+            if !self.path_exists(&resolved)? {
                 self.filesystem.write_file(&resolved, Vec::new(), false)?;
             }
         }
@@ -3775,8 +3852,8 @@ impl VirtualSession {
             &args,
             stdin,
             |path| self.read_path(path),
-            || self.filesystem.list_paths(),
-            |path| self.filesystem.is_dir(path),
+            || self.list_paths(),
+            |path| self.path_is_dir(path),
         )?;
         Ok(ExecutionResult {
             stdout: result.output,
@@ -3906,6 +3983,19 @@ struct ScriptState {
     stderr: Vec<u8>,
     last_result: Option<ExecutionResult>,
     executed_steps: usize,
+}
+
+fn parent_directory_chain(path: &str) -> Vec<String> {
+    let mut current = path.to_string();
+    let mut parents = Vec::new();
+    while let Some(index) = current.rfind('/') {
+        if index == 0 {
+            break;
+        }
+        current.truncate(index);
+        parents.push(current.clone());
+    }
+    parents
 }
 
 #[derive(Clone, Debug)]

@@ -34,9 +34,9 @@ Command-name parity with `just-bash` is done. The remaining work is mostly behav
 
 ### Tier 2: Filesystem And Providers
 
-- [ ] make lazy file providers visible to directory-oriented operations too: `find`, `ls`, `tree`, Python file helpers
-- [ ] decide whether broader mount adapter types should move from embedding-only experiments into the main product line
-- [ ] decide how far host copy-on-write should go on delete semantics and whiteouts
+- [x] make listing-capable lazy file providers visible to directory-oriented operations too: `find`, `ls`, `tree`, Python file helpers
+- [x] keep broader mount adapter types out of the main product line for now; explicit `host_mounts=[HostMount(...)]` stays the supported host model
+- [x] keep `host_cow` delete semantics non-whiteout; deleting host-backed paths remains unsupported by design
 
 ### Tier 3: Shell And Builtins
 

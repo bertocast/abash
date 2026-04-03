@@ -17,6 +17,7 @@ class NativeSandbox:
         custom_command_callback: object | None = None,
         lazy_mount_roots: list[str] | None = None,
         lazy_file_callback: object | None = None,
+        lazy_paths_callback: object | None = None,
         pre_exec_hook: object | None = None,
         post_exec_hook: object | None = None,
     ) -> None: ...

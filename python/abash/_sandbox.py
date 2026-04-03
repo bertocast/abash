@@ -21,6 +21,8 @@ from ._models import (
     ExecutionResult,
     FilesystemMode,
     HostMount,
+    LazyMountProvider,
+    LazyPathEntry,
     NetworkPolicy,
     RunEvent,
     RunSummary,
@@ -376,7 +378,7 @@ def _wrap_custom_command_callback(
 
 
 def _wrap_lazy_file_callback(
-    callbacks: dict[str, Callable[[str], str | bytes | None]] | None,
+    callbacks: dict[str, Callable[[str], str | bytes | None] | LazyMountProvider] | None,
 ) -> Callable[[str], str | bytes | None] | None:
     if not callbacks:
         return None
@@ -386,8 +388,58 @@ def _wrap_lazy_file_callback(
     def _bridge(path: str) -> str | bytes | None:
         for root in roots:
             if path == root or path.startswith(f"{root}/"):
-                return callbacks[root](path)
+                provider = callbacks[root]
+                if isinstance(provider, LazyMountProvider) or hasattr(provider, "read_file"):
+                    return provider.read_file(path)
+                return provider(path)
         return None
+
+    return _bridge
+
+
+def _wrap_lazy_paths_callback(
+    callbacks: dict[str, Callable[[str], str | bytes | None] | LazyMountProvider] | None,
+) -> Callable[[], list[tuple[str, bool]]] | None:
+    if not callbacks:
+        return None
+
+    def _normalize_lazy_path(root: str, entry: str | LazyPathEntry) -> tuple[str, bool]:
+        if isinstance(entry, LazyPathEntry):
+            raw_path = entry.path
+            is_dir = entry.is_dir
+        else:
+            raw_path = entry
+            is_dir = raw_path.endswith("/")
+            if is_dir and raw_path != "/":
+                raw_path = raw_path.rstrip("/")
+
+        if not raw_path:
+            raw_path = root
+
+        if raw_path.startswith("/"):
+            normalized = normalize_sandbox_path(raw_path)
+        else:
+            base = root.rstrip("/") or "/"
+            normalized = normalize_sandbox_path(f"{base}/{raw_path.lstrip('/')}")
+
+        if normalized != root and not normalized.startswith(f"{root}/"):
+            raise ValueError(f"lazy provider path escapes root {root}: {normalized}")
+        return normalized, is_dir
+
+    def _bridge() -> list[tuple[str, bool]]:
+        merged: dict[str, bool] = {}
+        for root, provider in callbacks.items():
+            list_paths = (
+                provider.list_paths
+                if isinstance(provider, LazyMountProvider) or hasattr(provider, "list_paths")
+                else None
+            )
+            if list_paths is None:
+                continue
+            for entry in list_paths():
+                path, is_dir = _normalize_lazy_path(root, entry)
+                merged[path] = merged.get(path, False) or is_dir
+        return sorted(merged.items())
 
     return _bridge
 
@@ -530,7 +582,10 @@ class Bash:
             Callable[..., ExecutionResult | str | bytes | DelegatedExecution],
         ]
         | None = None,
-        lazy_file_providers: dict[str, Callable[[str], str | bytes | None]] | None = None,
+        lazy_file_providers: dict[
+            str, Callable[[str], str | bytes | None] | LazyMountProvider
+        ]
+        | None = None,
         pre_exec_hook: Callable[[ExecutionRequest], ExecutionRequest | None] | None = None,
         post_exec_hook: Callable[
             [ExecutionRequest, ExecutionResult], ExecutionResult | None
@@ -559,6 +614,7 @@ class Bash:
         self._audit_callback_bridge = _wrap_audit_callback(options.audit_callback)
         self._custom_command_bridge = _wrap_custom_command_callback(options.custom_commands)
         self._lazy_file_bridge = _wrap_lazy_file_callback(options.lazy_file_providers)
+        self._lazy_paths_bridge = _wrap_lazy_paths_callback(options.lazy_file_providers)
         self._pre_exec_hook_bridge = _wrap_pre_exec_hook(options.pre_exec_hook)
         self._post_exec_hook_bridge = _wrap_post_exec_hook(options.post_exec_hook)
         self._native = NativeSandbox(
@@ -576,6 +632,7 @@ class Bash:
             self._custom_command_bridge,
             sorted(options.lazy_file_providers),
             self._lazy_file_bridge,
+            self._lazy_paths_bridge,
             self._pre_exec_hook_bridge,
             self._post_exec_hook_bridge,
         )
@@ -616,7 +673,10 @@ class Bash:
             Callable[..., ExecutionResult | str | bytes | DelegatedExecution],
         ]
         | None = None,
-        lazy_file_providers: dict[str, Callable[[str], str | bytes | None]] | None = None,
+        lazy_file_providers: dict[
+            str, Callable[[str], str | bytes | None] | LazyMountProvider
+        ]
+        | None = None,
         pre_exec_hook: Callable[[ExecutionRequest], ExecutionRequest | None] | None = None,
         post_exec_hook: Callable[
             [ExecutionRequest, ExecutionResult], ExecutionResult | None

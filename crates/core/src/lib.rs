@@ -323,6 +323,12 @@ pub enum ExtensionCommandResult {
     Delegate(ExecutionRequest),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LazyPathEntry {
+    pub path: String,
+    pub is_dir: bool,
+}
+
 pub trait SandboxExtensions: Send + Sync {
     fn exec_custom_command(
         &self,
@@ -333,6 +339,10 @@ pub trait SandboxExtensions: Send + Sync {
 
     fn read_lazy_file(&self, _path: &str) -> Result<Option<Vec<u8>>, SandboxError> {
         Ok(None)
+    }
+
+    fn list_lazy_paths(&self) -> Result<Vec<LazyPathEntry>, SandboxError> {
+        Ok(Vec::new())
     }
 }
 
@@ -381,6 +391,11 @@ impl SandboxSession {
             Ok(result) => result,
             Err(error) => ExecutionResult::failure(error, self.base_metadata()),
         }
+    }
+
+    pub fn resolve_path(&self, path: &str) -> Result<String, SandboxError> {
+        self.ensure_open()?;
+        resolve_sandbox_path(&self.config.default_cwd, path)
     }
 
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>, SandboxError> {

@@ -30,6 +30,7 @@ pub struct RuntimeCallbacks {
     pub custom_command_callback: Option<Arc<Py<PyAny>>>,
     pub custom_command_names: std::collections::BTreeSet<String>,
     pub lazy_file_callback: Option<Arc<Py<PyAny>>>,
+    pub lazy_paths_callback: Option<Arc<Py<PyAny>>>,
     pub lazy_mount_roots: std::collections::BTreeSet<String>,
     pub pre_exec_hook: Option<Arc<Py<PyAny>>>,
     pub post_exec_hook: Option<Arc<Py<PyAny>>>,
@@ -40,6 +41,7 @@ pub struct PythonExtensions {
     pub custom_command_callback: Option<Arc<Py<PyAny>>>,
     pub custom_command_names: std::collections::BTreeSet<String>,
     pub lazy_file_callback: Option<Arc<Py<PyAny>>>,
+    pub lazy_paths_callback: Option<Arc<Py<PyAny>>>,
     pub lazy_mount_roots: std::collections::BTreeSet<String>,
 }
 
@@ -120,6 +122,24 @@ impl SandboxExtensions for PythonExtensions {
                 "lazy file provider must return bytes, str, or None",
             )))
         })
+    }
+
+    fn list_lazy_paths(&self) -> Result<Vec<abash_core::LazyPathEntry>, SandboxError> {
+        let Some(callback) = self.lazy_paths_callback.as_ref() else {
+            return Ok(Vec::new());
+        };
+        Python::with_gil(
+            |py| -> Result<Vec<abash_core::LazyPathEntry>, SandboxError> {
+                let payload = callback.bind(py).call0().map_err(python_callback_error)?;
+                let entries = payload
+                    .extract::<Vec<(String, bool)>>()
+                    .map_err(python_callback_error)?;
+                Ok(entries
+                    .into_iter()
+                    .map(|(path, is_dir)| abash_core::LazyPathEntry { path, is_dir })
+                    .collect())
+            },
+        )
     }
 }
 
@@ -469,7 +489,20 @@ impl SandboxRuntime {
 
     pub fn read_file(&self, path: &str) -> Result<Vec<u8>, SandboxError> {
         self.ensure_idle()?;
-        self.session.lock().read_file(path)
+        let read_result = { self.session.lock().read_file(path) };
+        match read_result {
+            Ok(contents) => Ok(contents),
+            Err(SandboxError::InvalidRequest(_)) => {
+                let resolved = { self.session.lock().resolve_path(path)? };
+                match self.lazy_extensions().read_lazy_file(&resolved)? {
+                    Some(contents) => Ok(contents),
+                    None => Err(SandboxError::InvalidRequest(format!(
+                        "file does not exist: {resolved}"
+                    ))),
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn write_file(
@@ -491,7 +524,21 @@ impl SandboxRuntime {
 
     pub fn exists(&self, path: &str) -> Result<bool, SandboxError> {
         self.ensure_idle()?;
-        self.session.lock().exists(path)
+        let exists_result = { self.session.lock().exists(path) };
+        match exists_result {
+            Ok(true) => Ok(true),
+            Ok(false) | Err(SandboxError::InvalidRequest(_)) => {
+                let resolved = { self.session.lock().resolve_path(path)? };
+                Ok(self
+                    .lazy_extensions()
+                    .list_lazy_paths()?
+                    .into_iter()
+                    .any(|entry| {
+                        entry.path == resolved || entry.path.starts_with(&format!("{resolved}/"))
+                    }))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn close(&self) -> Result<(), SandboxError> {
@@ -535,6 +582,16 @@ impl SandboxRuntime {
         Ok(())
     }
 
+    fn lazy_extensions(&self) -> PythonExtensions {
+        PythonExtensions {
+            custom_command_callback: self.callbacks.custom_command_callback.clone(),
+            custom_command_names: self.callbacks.custom_command_names.clone(),
+            lazy_file_callback: self.callbacks.lazy_file_callback.clone(),
+            lazy_paths_callback: self.callbacks.lazy_paths_callback.clone(),
+            lazy_mount_roots: self.callbacks.lazy_mount_roots.clone(),
+        }
+    }
+
     fn clone_for_thread(&self) -> ThreadRuntime {
         ThreadRuntime {
             session_id: self.session_id.clone(),
@@ -547,6 +604,7 @@ impl SandboxRuntime {
                 custom_command_callback: self.callbacks.custom_command_callback.clone(),
                 custom_command_names: self.callbacks.custom_command_names.clone(),
                 lazy_file_callback: self.callbacks.lazy_file_callback.clone(),
+                lazy_paths_callback: self.callbacks.lazy_paths_callback.clone(),
                 lazy_mount_roots: self.callbacks.lazy_mount_roots.clone(),
                 pre_exec_hook: self.callbacks.pre_exec_hook.clone(),
                 post_exec_hook: self.callbacks.post_exec_hook.clone(),
@@ -666,6 +724,7 @@ impl ThreadRuntime {
             custom_command_callback: self.callbacks.custom_command_callback.clone(),
             custom_command_names: self.callbacks.custom_command_names.clone(),
             lazy_file_callback: self.callbacks.lazy_file_callback.clone(),
+            lazy_paths_callback: self.callbacks.lazy_paths_callback.clone(),
             lazy_mount_roots: self.callbacks.lazy_mount_roots.clone(),
         };
         let extension_result = match extensions.exec_custom_command(request)? {
