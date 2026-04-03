@@ -49,6 +49,12 @@ impl FilesystemMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostMount {
+    pub sandbox_path: String,
+    pub host_path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionState {
     Persistent,
     PerExec,
@@ -136,6 +142,7 @@ pub struct SandboxConfig {
     pub allowlisted_commands: BTreeSet<String>,
     pub default_cwd: String,
     pub workspace_root: Option<PathBuf>,
+    pub host_mounts: Vec<HostMount>,
     pub writable_roots: BTreeSet<String>,
     pub network_policy: Option<NetworkPolicy>,
 }
@@ -432,8 +439,24 @@ impl SandboxSession {
             "session_state".to_string(),
             self.config.session_state.as_str().to_string(),
         );
-        if self.config.workspace_root.is_some() {
-            metadata.insert("workspace_mount".to_string(), "/workspace".to_string());
+        if self.config.workspace_root.is_some() || !self.config.host_mounts.is_empty() {
+            let mount_paths = if self.config.workspace_root.is_some() {
+                std::iter::once("/workspace".to_string())
+                    .chain(
+                        self.config
+                            .host_mounts
+                            .iter()
+                            .map(|mount| mount.sandbox_path.clone()),
+                    )
+                    .collect::<Vec<_>>()
+            } else {
+                self.config
+                    .host_mounts
+                    .iter()
+                    .map(|mount| mount.sandbox_path.clone())
+                    .collect::<Vec<_>>()
+            };
+            metadata.insert("workspace_mount".to_string(), mount_paths.join(","));
         }
         metadata
     }
@@ -469,14 +492,129 @@ pub fn default_cwd_for_mode(mode: &FilesystemMode) -> &'static str {
     }
 }
 
+pub fn default_cwd_for_host_mounts(
+    workspace_root: Option<&Path>,
+    host_mounts: &[HostMount],
+    mode: &FilesystemMode,
+) -> String {
+    match mode {
+        FilesystemMode::Memory => "/".to_string(),
+        FilesystemMode::HostReadonly | FilesystemMode::HostCow | FilesystemMode::HostReadwrite => {
+            if workspace_root.is_some() {
+                return "/workspace".to_string();
+            }
+            host_mounts
+                .iter()
+                .map(|mount| mount.sandbox_path.clone())
+                .min()
+                .unwrap_or_else(|| "/workspace".to_string())
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedHostMount {
+    sandbox_path: String,
+    host_path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct HostMountTable {
+    mounts: Vec<ResolvedHostMount>,
+}
+
+impl HostMountTable {
+    fn new(config: &SandboxConfig) -> Result<Self, SandboxError> {
+        let mut mounts = Vec::new();
+        if let Some(root) = config.workspace_root.as_ref() {
+            mounts.push(ResolvedHostMount {
+                sandbox_path: "/workspace".to_string(),
+                host_path: canonicalize_host_root(root)?,
+            });
+        }
+
+        for mount in &config.host_mounts {
+            let sandbox_path = normalize_mount_root(&mount.sandbox_path)?;
+            let host_path = canonicalize_host_root(&mount.host_path)?;
+            mounts.push(ResolvedHostMount {
+                sandbox_path,
+                host_path,
+            });
+        }
+
+        if mounts.is_empty() {
+            return Err(SandboxError::InvalidRequest(
+                "host-backed filesystem modes require at least one host mount".to_string(),
+            ));
+        }
+
+        mounts.sort_by(|left, right| left.sandbox_path.cmp(&right.sandbox_path));
+        for window in mounts.windows(2) {
+            let left = &window[0];
+            let right = &window[1];
+            if left.sandbox_path == right.sandbox_path {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "duplicate host mount path: {}",
+                    left.sandbox_path
+                )));
+            }
+            if path_is_within_root(&right.sandbox_path, &left.sandbox_path) {
+                return Err(SandboxError::InvalidRequest(format!(
+                    "nested host mounts are not supported: {} and {}",
+                    left.sandbox_path, right.sandbox_path
+                )));
+            }
+        }
+
+        Ok(Self { mounts })
+    }
+
+    fn mount_paths(&self) -> impl Iterator<Item = &str> {
+        self.mounts.iter().map(|mount| mount.sandbox_path.as_str())
+    }
+
+    fn resolve<'a>(
+        &'a self,
+        path: &str,
+    ) -> Result<(&'a ResolvedHostMount, String, PathBuf), SandboxError> {
+        let normalized = normalize_sandbox_path(path)?;
+        let mount = self
+            .mounts
+            .iter()
+            .find(|mount| path_is_within_root(&normalized, &mount.sandbox_path))
+            .ok_or_else(|| {
+                SandboxError::PolicyDenied(format!(
+                    "host-backed filesystem access is restricted to: {}",
+                    self.mount_paths().collect::<Vec<_>>().join(", ")
+                ))
+            })?;
+        let relative = sandbox_to_mount_relative(&normalized, &mount.sandbox_path)?;
+        Ok((mount, normalized, relative))
+    }
+
+    fn list_paths(&self) -> Result<Vec<String>, SandboxError> {
+        let mut paths = vec!["/".to_string()];
+        for mount in &self.mounts {
+            paths.push(mount.sandbox_path.clone());
+            paths.extend(list_host_paths_for_mount(
+                &mount.host_path,
+                &mount.sandbox_path,
+            )?);
+        }
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+}
+
 pub fn create_filesystem(
     config: &SandboxConfig,
 ) -> Result<Box<dyn SandboxFilesystem>, SandboxError> {
     match config.filesystem_mode {
         FilesystemMode::Memory => {
-            if config.workspace_root.is_some() {
+            if config.workspace_root.is_some() || !config.host_mounts.is_empty() {
                 return Err(SandboxError::InvalidRequest(
-                    "memory filesystem mode must not configure a host workspace root".to_string(),
+                    "memory filesystem mode must not configure host mounts".to_string(),
                 ));
             }
             if !config.writable_roots.is_empty() {
@@ -493,9 +631,9 @@ pub fn create_filesystem(
                     "host_readonly mode must not configure writable roots".to_string(),
                 ));
             }
-            Ok(Box::new(HostReadonlyFilesystem::new(
-                resolve_workspace_root(config)?,
-            )?))
+            Ok(Box::new(HostReadonlyFilesystem::new(HostMountTable::new(
+                config,
+            )?)?))
         }
         FilesystemMode::HostCow => {
             validate_workspace_profile(config)?;
@@ -504,15 +642,15 @@ pub fn create_filesystem(
                     "host_cow mode must not configure writable roots".to_string(),
                 ));
             }
-            Ok(Box::new(HostCowFilesystem::new(resolve_workspace_root(
+            Ok(Box::new(HostCowFilesystem::new(HostMountTable::new(
                 config,
             )?)?))
         }
         FilesystemMode::HostReadwrite => {
             validate_workspace_profile(config)?;
             Ok(Box::new(HostReadwriteFilesystem::new(
-                resolve_workspace_root(config)?,
-                normalize_writable_roots(&config.writable_roots)?,
+                HostMountTable::new(config)?,
+                normalize_writable_roots(&HostMountTable::new(config)?, &config.writable_roots)?,
             )?))
         }
     }
@@ -817,12 +955,12 @@ impl SandboxFilesystem for MemoryFilesystem {
 }
 
 struct HostReadonlyFilesystem {
-    root: PathBuf,
+    mounts: HostMountTable,
 }
 
 impl HostReadonlyFilesystem {
-    fn new(root: PathBuf) -> Result<Self, SandboxError> {
-        Ok(Self { root })
+    fn new(mounts: HostMountTable) -> Result<Self, SandboxError> {
+        Ok(Self { mounts })
     }
 }
 
@@ -832,7 +970,7 @@ impl SandboxFilesystem for HostReadonlyFilesystem {
     }
 
     fn read_file(&self, path: &str) -> Result<Vec<u8>, SandboxError> {
-        host_read_file(&self.root, path)
+        host_read_file(&self.mounts, path)
     }
 
     fn write_file(
@@ -859,15 +997,15 @@ impl SandboxFilesystem for HostReadonlyFilesystem {
     }
 
     fn exists(&self, path: &str) -> Result<bool, SandboxError> {
-        host_exists(&self.root, path)
+        host_exists(&self.mounts, path)
     }
 
     fn is_dir(&self, path: &str) -> Result<bool, SandboxError> {
-        host_is_dir(&self.root, path)
+        host_is_dir(&self.mounts, path)
     }
 
     fn get_mode_bits(&self, path: &str) -> Result<u32, SandboxError> {
-        host_get_mode(&self.root, path)
+        host_get_mode(&self.mounts, path)
     }
 
     fn chmod(&mut self, _path: &str, _mode: u32) -> Result<(), SandboxError> {
@@ -877,11 +1015,11 @@ impl SandboxFilesystem for HostReadonlyFilesystem {
     }
 
     fn list_paths(&self) -> Result<Vec<String>, SandboxError> {
-        list_host_paths(&self.root)
+        self.mounts.list_paths()
     }
 
     fn read_link(&self, path: &str) -> Result<Option<String>, SandboxError> {
-        host_read_link(&self.root, path)
+        host_read_link(&self.mounts, path)
     }
 
     fn create_symlink(&mut self, _target: &str, _link_path: &str) -> Result<(), SandboxError> {
@@ -898,22 +1036,24 @@ impl SandboxFilesystem for HostReadonlyFilesystem {
 }
 
 struct HostCowFilesystem {
-    root: PathBuf,
+    mounts: HostMountTable,
     overlay_files: HashMap<String, Vec<u8>>,
     overlay_dirs: HashSet<String>,
     overlay_modes: HashMap<String, u32>,
 }
 
 impl HostCowFilesystem {
-    fn new(root: PathBuf) -> Result<Self, SandboxError> {
+    fn new(mounts: HostMountTable) -> Result<Self, SandboxError> {
         let mut overlay_dirs = HashSet::new();
         overlay_dirs.insert("/".to_string());
-        overlay_dirs.insert("/workspace".to_string());
         let mut overlay_modes = HashMap::new();
         overlay_modes.insert("/".to_string(), 0o755);
-        overlay_modes.insert("/workspace".to_string(), 0o755);
+        for mount_path in mounts.mount_paths() {
+            overlay_dirs.insert(mount_path.to_string());
+            overlay_modes.insert(mount_path.to_string(), 0o755);
+        }
         Ok(Self {
-            root,
+            mounts,
             overlay_files: HashMap::new(),
             overlay_dirs,
             overlay_modes,
@@ -921,7 +1061,7 @@ impl HostCowFilesystem {
     }
 
     fn ensure_overlay_dirs(&mut self, path: &str) -> Result<(), SandboxError> {
-        let normalized = normalize_workspace_path(path)?;
+        let normalized = normalize_host_mount_path(&self.mounts, path)?;
         let mut current = String::new();
         for segment in normalized.split('/').filter(|segment| !segment.is_empty()) {
             current.push('/');
@@ -939,11 +1079,11 @@ impl SandboxFilesystem for HostCowFilesystem {
     }
 
     fn read_file(&self, path: &str) -> Result<Vec<u8>, SandboxError> {
-        let normalized = normalize_workspace_path(path)?;
+        let normalized = normalize_host_mount_path(&self.mounts, path)?;
         if let Some(contents) = self.overlay_files.get(&normalized) {
             return Ok(contents.clone());
         }
-        host_read_file(&self.root, &normalized)
+        host_read_file(&self.mounts, &normalized)
     }
 
     fn write_file(
@@ -952,10 +1092,10 @@ impl SandboxFilesystem for HostCowFilesystem {
         contents: Vec<u8>,
         create_parents: bool,
     ) -> Result<(), SandboxError> {
-        let normalized = normalize_workspace_path(path)?;
-        if normalized == "/workspace" {
+        let normalized = normalize_host_mount_path(&self.mounts, path)?;
+        if self.mounts.mount_paths().any(|mount| mount == normalized) {
             return Err(SandboxError::InvalidRequest(
-                "cannot write file contents to the workspace root".to_string(),
+                "cannot write file contents to a mount root".to_string(),
             ));
         }
         let parent = parent_dir(&normalized).ok_or_else(|| {
@@ -963,7 +1103,7 @@ impl SandboxFilesystem for HostCowFilesystem {
         })?;
         if create_parents {
             self.ensure_overlay_dirs(&parent)?;
-        } else if !self.overlay_dirs.contains(&parent) && !host_exists(&self.root, &parent)? {
+        } else if !self.overlay_dirs.contains(&parent) && !host_exists(&self.mounts, &parent)? {
             return Err(SandboxError::InvalidRequest(format!(
                 "parent directory does not exist: {parent}"
             )));
@@ -974,8 +1114,8 @@ impl SandboxFilesystem for HostCowFilesystem {
     }
 
     fn mkdir(&mut self, path: &str, parents: bool) -> Result<(), SandboxError> {
-        let normalized = normalize_workspace_path(path)?;
-        if normalized == "/workspace" {
+        let normalized = normalize_host_mount_path(&self.mounts, path)?;
+        if self.mounts.mount_paths().any(|mount| mount == normalized) {
             return Ok(());
         }
         let parent = parent_dir(&normalized).ok_or_else(|| {
@@ -983,7 +1123,7 @@ impl SandboxFilesystem for HostCowFilesystem {
         })?;
         if parents {
             self.ensure_overlay_dirs(&normalized)?;
-        } else if !self.overlay_dirs.contains(&parent) && !host_exists(&self.root, &parent)? {
+        } else if !self.overlay_dirs.contains(&parent) && !host_exists(&self.mounts, &parent)? {
             return Err(SandboxError::InvalidRequest(format!(
                 "parent directory does not exist: {parent}"
             )));
@@ -995,10 +1135,10 @@ impl SandboxFilesystem for HostCowFilesystem {
     }
 
     fn delete_path(&mut self, path: &str, recursive: bool) -> Result<(), SandboxError> {
-        let normalized = normalize_workspace_path(path)?;
-        if normalized == "/workspace" {
+        let normalized = normalize_host_mount_path(&self.mounts, path)?;
+        if self.mounts.mount_paths().any(|mount| mount == normalized) {
             return Err(SandboxError::InvalidRequest(
-                "cannot delete the workspace root".to_string(),
+                "cannot delete a mount root".to_string(),
             ));
         }
 
@@ -1006,7 +1146,7 @@ impl SandboxFilesystem for HostCowFilesystem {
             return Ok(());
         }
 
-        if self.overlay_dirs.contains(&normalized) && !host_exists(&self.root, &normalized)? {
+        if self.overlay_dirs.contains(&normalized) && !host_exists(&self.mounts, &normalized)? {
             if !recursive {
                 return Err(SandboxError::InvalidRequest(format!(
                     "cannot remove directory without -r: {normalized}"
@@ -1022,7 +1162,7 @@ impl SandboxFilesystem for HostCowFilesystem {
             return Ok(());
         }
 
-        if host_exists(&self.root, &normalized)? {
+        if host_exists(&self.mounts, &normalized)? {
             return Err(SandboxError::UnsupportedFeature(
                 "host_cow mode does not support deleting host-backed paths".to_string(),
             ));
@@ -1034,26 +1174,26 @@ impl SandboxFilesystem for HostCowFilesystem {
     }
 
     fn exists(&self, path: &str) -> Result<bool, SandboxError> {
-        let normalized = normalize_workspace_path(path)?;
+        let normalized = normalize_host_mount_path(&self.mounts, path)?;
         if self.overlay_files.contains_key(&normalized) || self.overlay_dirs.contains(&normalized) {
             return Ok(true);
         }
-        host_exists(&self.root, &normalized)
+        host_exists(&self.mounts, &normalized)
     }
 
     fn is_dir(&self, path: &str) -> Result<bool, SandboxError> {
-        let normalized = normalize_workspace_path(path)?;
+        let normalized = normalize_host_mount_path(&self.mounts, path)?;
         if self.overlay_dirs.contains(&normalized) {
             return Ok(true);
         }
         if self.overlay_files.contains_key(&normalized) {
             return Ok(false);
         }
-        host_is_dir(&self.root, &normalized)
+        host_is_dir(&self.mounts, &normalized)
     }
 
     fn get_mode_bits(&self, path: &str) -> Result<u32, SandboxError> {
-        let normalized = normalize_workspace_path(path)?;
+        let normalized = normalize_host_mount_path(&self.mounts, path)?;
         if let Some(mode) = self.overlay_modes.get(&normalized) {
             return Ok(*mode);
         }
@@ -1063,14 +1203,14 @@ impl SandboxFilesystem for HostCowFilesystem {
         if self.overlay_files.contains_key(&normalized) {
             return Ok(0o644);
         }
-        host_get_mode(&self.root, &normalized)
+        host_get_mode(&self.mounts, &normalized)
     }
 
     fn chmod(&mut self, path: &str, mode: u32) -> Result<(), SandboxError> {
-        let normalized = normalize_workspace_path(path)?;
+        let normalized = normalize_host_mount_path(&self.mounts, path)?;
         if self.overlay_files.contains_key(&normalized)
             || self.overlay_dirs.contains(&normalized)
-            || host_exists(&self.root, &normalized)?
+            || host_exists(&self.mounts, &normalized)?
         {
             self.overlay_modes.insert(normalized, mode & 0o7777);
             Ok(())
@@ -1082,7 +1222,7 @@ impl SandboxFilesystem for HostCowFilesystem {
     }
 
     fn list_paths(&self) -> Result<Vec<String>, SandboxError> {
-        let mut paths = list_host_paths(&self.root)?;
+        let mut paths = self.mounts.list_paths()?;
         paths.extend(self.overlay_dirs.iter().cloned());
         paths.extend(self.overlay_files.keys().cloned());
         paths.sort();
@@ -1091,11 +1231,11 @@ impl SandboxFilesystem for HostCowFilesystem {
     }
 
     fn read_link(&self, path: &str) -> Result<Option<String>, SandboxError> {
-        let normalized = normalize_workspace_path(path)?;
+        let normalized = normalize_host_mount_path(&self.mounts, path)?;
         if self.overlay_files.contains_key(&normalized) || self.overlay_dirs.contains(&normalized) {
             return Ok(None);
         }
-        host_read_link(&self.root, &normalized)
+        host_read_link(&self.mounts, &normalized)
     }
 
     fn create_symlink(&mut self, _target: &str, _link_path: &str) -> Result<(), SandboxError> {
@@ -1112,19 +1252,19 @@ impl SandboxFilesystem for HostCowFilesystem {
 }
 
 struct HostReadwriteFilesystem {
-    root: PathBuf,
+    mounts: HostMountTable,
     writable_roots: Vec<String>,
 }
 
 impl HostReadwriteFilesystem {
-    fn new(root: PathBuf, writable_roots: Vec<String>) -> Result<Self, SandboxError> {
+    fn new(mounts: HostMountTable, writable_roots: Vec<String>) -> Result<Self, SandboxError> {
         if writable_roots.is_empty() {
             return Err(SandboxError::InvalidRequest(
                 "host_readwrite mode requires at least one writable root".to_string(),
             ));
         }
         Ok(Self {
-            root,
+            mounts,
             writable_roots,
         })
     }
@@ -1150,7 +1290,7 @@ impl SandboxFilesystem for HostReadwriteFilesystem {
     }
 
     fn read_file(&self, path: &str) -> Result<Vec<u8>, SandboxError> {
-        host_read_file(&self.root, path)
+        host_read_file(&self.mounts, path)
     }
 
     fn write_file(
@@ -1159,9 +1299,9 @@ impl SandboxFilesystem for HostReadwriteFilesystem {
         contents: Vec<u8>,
         create_parents: bool,
     ) -> Result<(), SandboxError> {
-        let normalized = normalize_workspace_path(path)?;
+        let normalized = normalize_host_mount_path(&self.mounts, path)?;
         self.ensure_writable(&normalized)?;
-        let candidate = host_target_for_write(&self.root, &normalized, create_parents)?;
+        let candidate = host_target_for_write(&self.mounts, &normalized, create_parents)?;
         if let Some(parent) = candidate.parent() {
             if create_parents {
                 fs::create_dir_all(parent).map_err(|error| {
@@ -1174,9 +1314,9 @@ impl SandboxFilesystem for HostReadwriteFilesystem {
     }
 
     fn mkdir(&mut self, path: &str, parents: bool) -> Result<(), SandboxError> {
-        let normalized = normalize_workspace_path(path)?;
+        let normalized = normalize_host_mount_path(&self.mounts, path)?;
         self.ensure_writable(&normalized)?;
-        let candidate = host_target_for_directory(&self.root, &normalized, parents)?;
+        let candidate = host_target_for_directory(&self.mounts, &normalized, parents)?;
         let result = if parents {
             fs::create_dir_all(&candidate)
         } else {
@@ -1192,16 +1332,17 @@ impl SandboxFilesystem for HostReadwriteFilesystem {
     }
 
     fn delete_path(&mut self, path: &str, recursive: bool) -> Result<(), SandboxError> {
-        let normalized = normalize_workspace_path(path)?;
-        if normalized == "/workspace" {
+        let normalized = normalize_host_mount_path(&self.mounts, path)?;
+        if self.mounts.mount_paths().any(|mount| mount == normalized) {
             return Err(SandboxError::InvalidRequest(
-                "cannot delete the workspace root".to_string(),
+                "cannot delete a mount root".to_string(),
             ));
         }
         self.ensure_writable(&normalized)?;
 
-        let candidate = self.root.join(sandbox_to_workspace_relative(&normalized)?);
-        validate_existing_ancestor(&self.root, &candidate, false)?;
+        let (mount, _, relative) = self.mounts.resolve(&normalized)?;
+        let candidate = mount.host_path.join(relative);
+        validate_existing_ancestor(&mount.host_path, &candidate, false)?;
         let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 SandboxError::InvalidRequest(format!("path does not exist: {normalized}"))
@@ -1227,60 +1368,65 @@ impl SandboxFilesystem for HostReadwriteFilesystem {
     }
 
     fn exists(&self, path: &str) -> Result<bool, SandboxError> {
-        host_exists(&self.root, path)
+        host_exists(&self.mounts, path)
     }
 
     fn is_dir(&self, path: &str) -> Result<bool, SandboxError> {
-        host_is_dir(&self.root, path)
+        host_is_dir(&self.mounts, path)
     }
 
     fn get_mode_bits(&self, path: &str) -> Result<u32, SandboxError> {
-        host_get_mode(&self.root, path)
+        host_get_mode(&self.mounts, path)
     }
 
     fn chmod(&mut self, path: &str, mode: u32) -> Result<(), SandboxError> {
-        let normalized = normalize_workspace_path(path)?;
-        if normalized == "/workspace" {
+        let normalized = normalize_host_mount_path(&self.mounts, path)?;
+        if self.mounts.mount_paths().any(|mount| mount == normalized) {
             return Err(SandboxError::InvalidRequest(
-                "cannot chmod the workspace root".to_string(),
+                "cannot chmod a mount root".to_string(),
             ));
         }
         self.ensure_writable(&normalized)?;
-        host_set_mode(&self.root, &normalized, mode)
+        host_set_mode(&self.mounts, &normalized, mode)
     }
 
     fn list_paths(&self) -> Result<Vec<String>, SandboxError> {
-        list_host_paths(&self.root)
+        self.mounts.list_paths()
     }
 
     fn read_link(&self, path: &str) -> Result<Option<String>, SandboxError> {
-        host_read_link(&self.root, path)
+        host_read_link(&self.mounts, path)
     }
 
     fn create_symlink(&mut self, target: &str, link_path: &str) -> Result<(), SandboxError> {
-        let normalized_link = normalize_workspace_path(link_path)?;
-        if normalized_link == "/workspace" {
+        let normalized_link = normalize_host_mount_path(&self.mounts, link_path)?;
+        if self
+            .mounts
+            .mount_paths()
+            .any(|mount| mount == normalized_link)
+        {
             return Err(SandboxError::InvalidRequest(
-                "cannot create a symlink at the workspace root".to_string(),
+                "cannot create a symlink at a mount root".to_string(),
             ));
         }
         self.ensure_writable(&normalized_link)?;
 
-        let link_candidate = host_target_for_write(&self.root, &normalized_link, false)?;
+        let (link_mount, _, link_relative) = self.mounts.resolve(&normalized_link)?;
+        let link_candidate = host_target_for_write(&self.mounts, &normalized_link, false)?;
         if fs::symlink_metadata(&link_candidate).is_ok() {
             return Err(SandboxError::InvalidRequest(format!(
                 "path already exists: {normalized_link}"
             )));
         }
 
-        let normalized_target = normalize_workspace_path(target)?;
-        let target_candidate = self
-            .root
-            .join(sandbox_to_workspace_relative(&normalized_target)?);
+        let normalized_target = normalize_host_mount_path(&self.mounts, target)?;
+        let (target_mount, _, target_relative) = self.mounts.resolve(&normalized_target)?;
+        let target_candidate = target_mount.host_path.join(target_relative);
         let link_parent = link_candidate.parent().ok_or_else(|| {
             SandboxError::InvalidRequest("symlink destination must have a parent".to_string())
         })?;
         let relative_target = relative_host_path(link_parent, &target_candidate)?;
+        let _ = (link_mount, link_relative);
 
         #[cfg(unix)]
         {
@@ -1299,31 +1445,38 @@ impl SandboxFilesystem for HostReadwriteFilesystem {
     }
 
     fn create_hard_link(&mut self, target: &str, link_path: &str) -> Result<(), SandboxError> {
-        let normalized_link = normalize_workspace_path(link_path)?;
-        if normalized_link == "/workspace" {
+        let normalized_link = normalize_host_mount_path(&self.mounts, link_path)?;
+        if self
+            .mounts
+            .mount_paths()
+            .any(|mount| mount == normalized_link)
+        {
             return Err(SandboxError::InvalidRequest(
-                "cannot create a hard link at the workspace root".to_string(),
+                "cannot create a hard link at a mount root".to_string(),
             ));
         }
         self.ensure_writable(&normalized_link)?;
 
-        let link_candidate = host_target_for_write(&self.root, &normalized_link, false)?;
+        let link_candidate = host_target_for_write(&self.mounts, &normalized_link, false)?;
         if fs::symlink_metadata(&link_candidate).is_ok() {
             return Err(SandboxError::InvalidRequest(format!(
                 "path already exists: {normalized_link}"
             )));
         }
 
-        let normalized_target = normalize_workspace_path(target)?;
-        if normalized_target == "/workspace" {
+        let normalized_target = normalize_host_mount_path(&self.mounts, target)?;
+        if self
+            .mounts
+            .mount_paths()
+            .any(|mount| mount == normalized_target)
+        {
             return Err(SandboxError::InvalidRequest(
-                "hard links are not allowed for directories: /workspace".to_string(),
+                "hard links are not allowed for mount roots".to_string(),
             ));
         }
-        let raw_target = self
-            .root
-            .join(sandbox_to_workspace_relative(&normalized_target)?);
-        validate_existing_ancestor(&self.root, &raw_target, false)?;
+        let (target_mount, _, target_relative) = self.mounts.resolve(&normalized_target)?;
+        let raw_target = target_mount.host_path.join(target_relative);
+        validate_existing_ancestor(&target_mount.host_path, &raw_target, false)?;
         let metadata = fs::symlink_metadata(&raw_target).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 SandboxError::InvalidRequest(format!("path does not exist: {normalized_target}"))
@@ -1344,7 +1497,7 @@ impl SandboxFilesystem for HostReadwriteFilesystem {
                     "host-backed path could not be resolved safely: {error}"
                 ))
             })?;
-            ensure_within_root(&self.root, &canonical)?;
+            ensure_within_root(&target_mount.host_path, &canonical)?;
             canonical
         } else {
             raw_target
@@ -1425,31 +1578,51 @@ fn validate_workspace_profile(config: &SandboxConfig) -> Result<(), SandboxError
     Ok(())
 }
 
-fn resolve_workspace_root(config: &SandboxConfig) -> Result<PathBuf, SandboxError> {
-    let root = config.workspace_root.as_ref().ok_or_else(|| {
-        SandboxError::InvalidRequest(
-            "host-backed filesystem modes require a workspace_root".to_string(),
-        )
-    })?;
+fn canonicalize_host_root(root: &Path) -> Result<PathBuf, SandboxError> {
     let canonical = fs::canonicalize(root).map_err(|error| {
-        SandboxError::InvalidRequest(format!(
-            "workspace_root must exist and be accessible: {error}"
-        ))
+        SandboxError::InvalidRequest(format!("host mount must exist and be accessible: {error}"))
     })?;
     if !canonical.is_dir() {
         return Err(SandboxError::InvalidRequest(
-            "workspace_root must be a directory".to_string(),
+            "host mount must be a directory".to_string(),
         ));
     }
     Ok(canonical)
 }
 
+fn normalize_mount_root(path: &str) -> Result<String, SandboxError> {
+    let normalized = normalize_sandbox_path(path)?;
+    if normalized == "/" {
+        return Err(SandboxError::InvalidRequest(
+            "host mount path must not be /".to_string(),
+        ));
+    }
+    Ok(normalized)
+}
+
+fn normalize_host_mount_path(mounts: &HostMountTable, path: &str) -> Result<String, SandboxError> {
+    let normalized = normalize_sandbox_path(path)?;
+    if mounts
+        .mounts
+        .iter()
+        .any(|mount| path_is_within_root(&normalized, &mount.sandbox_path))
+    {
+        Ok(normalized)
+    } else {
+        Err(SandboxError::PolicyDenied(format!(
+            "host-backed filesystem access is restricted to: {}",
+            mounts.mount_paths().collect::<Vec<_>>().join(", ")
+        )))
+    }
+}
+
 fn normalize_writable_roots(
+    mounts: &HostMountTable,
     writable_roots: &BTreeSet<String>,
 ) -> Result<Vec<String>, SandboxError> {
     let mut normalized = writable_roots
         .iter()
-        .map(|path| normalize_workspace_path(path))
+        .map(|path| normalize_host_mount_path(mounts, path))
         .collect::<Result<Vec<_>, _>>()?;
     normalized.sort();
     normalized.dedup();
@@ -1463,12 +1636,19 @@ fn path_is_within_root(path: &str, root: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
-fn sandbox_to_workspace_relative(path: &str) -> Result<PathBuf, SandboxError> {
-    let normalized = normalize_workspace_path(path)?;
-    if normalized == "/workspace" {
+fn sandbox_to_mount_relative(path: &str, mount_path: &str) -> Result<PathBuf, SandboxError> {
+    let normalized = normalize_sandbox_path(path)?;
+    let mount_path = normalize_mount_root(mount_path)?;
+    if normalized == mount_path {
         Ok(PathBuf::new())
     } else {
-        Ok(PathBuf::from(normalized.trim_start_matches("/workspace/")))
+        let prefix = format!("{mount_path}/");
+        let relative = normalized.strip_prefix(&prefix).ok_or_else(|| {
+            SandboxError::PolicyDenied(format!(
+                "path is not within configured host mount: {normalized}"
+            ))
+        })?;
+        Ok(PathBuf::from(relative))
     }
 }
 
@@ -1487,12 +1667,12 @@ fn parent_dir(path: &str) -> Option<String> {
     }
 }
 
-fn host_exists(root: &Path, path: &str) -> Result<bool, SandboxError> {
-    let normalized = normalize_workspace_path(path)?;
-    if normalized == "/workspace" {
+fn host_exists(mounts: &HostMountTable, path: &str) -> Result<bool, SandboxError> {
+    let (mount, normalized, relative) = mounts.resolve(path)?;
+    if normalized == mount.sandbox_path {
         return Ok(true);
     }
-    let candidate = root.join(sandbox_to_workspace_relative(&normalized)?);
+    let candidate = mount.host_path.join(relative);
     match fs::symlink_metadata(&candidate) {
         Ok(_) => {
             let canonical = fs::canonicalize(&candidate).map_err(|error| {
@@ -1500,7 +1680,7 @@ fn host_exists(root: &Path, path: &str) -> Result<bool, SandboxError> {
                     "host-backed path could not be resolved safely: {error}"
                 ))
             })?;
-            ensure_within_root(root, &canonical)?;
+            ensure_within_root(&mount.host_path, &canonical)?;
             Ok(true)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -1510,20 +1690,20 @@ fn host_exists(root: &Path, path: &str) -> Result<bool, SandboxError> {
     }
 }
 
-fn host_read_file(root: &Path, path: &str) -> Result<Vec<u8>, SandboxError> {
-    let normalized = normalize_workspace_path(path)?;
-    if normalized == "/workspace" {
+fn host_read_file(mounts: &HostMountTable, path: &str) -> Result<Vec<u8>, SandboxError> {
+    let (mount, normalized, relative) = mounts.resolve(path)?;
+    if normalized == mount.sandbox_path {
         return Err(SandboxError::InvalidRequest(
-            "cannot read the workspace root as a file".to_string(),
+            "cannot read a mount root as a file".to_string(),
         ));
     }
-    let candidate = root.join(sandbox_to_workspace_relative(&normalized)?);
+    let candidate = mount.host_path.join(relative);
     let canonical = fs::canonicalize(&candidate).map_err(|error| {
         SandboxError::InvalidRequest(format!(
             "file does not exist or cannot be resolved: {error}"
         ))
     })?;
-    ensure_within_root(root, &canonical)?;
+    ensure_within_root(&mount.host_path, &canonical)?;
     if canonical.is_dir() {
         return Err(SandboxError::InvalidRequest(format!(
             "path is a directory: {normalized}"
@@ -1533,12 +1713,12 @@ fn host_read_file(root: &Path, path: &str) -> Result<Vec<u8>, SandboxError> {
         .map_err(|error| SandboxError::BackendFailure(format!("failed to read file: {error}")))
 }
 
-fn host_is_dir(root: &Path, path: &str) -> Result<bool, SandboxError> {
-    let normalized = normalize_workspace_path(path)?;
-    if normalized == "/workspace" {
+fn host_is_dir(mounts: &HostMountTable, path: &str) -> Result<bool, SandboxError> {
+    let (mount, normalized, relative) = mounts.resolve(path)?;
+    if normalized == mount.sandbox_path {
         return Ok(true);
     }
-    let candidate = root.join(sandbox_to_workspace_relative(&normalized)?);
+    let candidate = mount.host_path.join(relative);
     match fs::symlink_metadata(&candidate) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() {
@@ -1547,7 +1727,7 @@ fn host_is_dir(root: &Path, path: &str) -> Result<bool, SandboxError> {
                         "host-backed path could not be resolved safely: {error}"
                     ))
                 })?;
-                ensure_within_root(root, &canonical)?;
+                ensure_within_root(&mount.host_path, &canonical)?;
                 Ok(canonical.is_dir())
             } else {
                 Ok(metadata.is_dir())
@@ -1562,12 +1742,12 @@ fn host_is_dir(root: &Path, path: &str) -> Result<bool, SandboxError> {
     }
 }
 
-fn host_read_link(root: &Path, path: &str) -> Result<Option<String>, SandboxError> {
-    let normalized = normalize_workspace_path(path)?;
-    if normalized == "/workspace" {
+fn host_read_link(mounts: &HostMountTable, path: &str) -> Result<Option<String>, SandboxError> {
+    let (mount, normalized, relative) = mounts.resolve(path)?;
+    if normalized == mount.sandbox_path {
         return Ok(None);
     }
-    let candidate = root.join(sandbox_to_workspace_relative(&normalized)?);
+    let candidate = mount.host_path.join(relative);
     let metadata = match fs::symlink_metadata(&candidate) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1588,16 +1768,21 @@ fn host_read_link(root: &Path, path: &str) -> Result<Option<String>, SandboxErro
     let raw_target = fs::read_link(&candidate).map_err(|error| {
         SandboxError::BackendFailure(format!("failed to read symlink: {error}"))
     })?;
-    let resolved = normalize_link_target(root, candidate.parent().unwrap_or(root), &raw_target)?;
+    let resolved = normalize_link_target(
+        &mount.host_path,
+        &mount.sandbox_path,
+        candidate.parent().unwrap_or(&mount.host_path),
+        &raw_target,
+    )?;
     Ok(Some(resolved))
 }
 
-fn host_get_mode(root: &Path, path: &str) -> Result<u32, SandboxError> {
-    let normalized = normalize_workspace_path(path)?;
-    if normalized == "/workspace" {
+fn host_get_mode(mounts: &HostMountTable, path: &str) -> Result<u32, SandboxError> {
+    let (mount, normalized, relative) = mounts.resolve(path)?;
+    if normalized == mount.sandbox_path {
         return Ok(0o755);
     }
-    let candidate = root.join(sandbox_to_workspace_relative(&normalized)?);
+    let candidate = mount.host_path.join(relative);
     let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             SandboxError::InvalidRequest(format!("path does not exist: {normalized}"))
@@ -1611,7 +1796,7 @@ fn host_get_mode(root: &Path, path: &str) -> Result<u32, SandboxError> {
                 "host-backed path could not be resolved safely: {error}"
             ))
         })?;
-        ensure_within_root(root, &canonical)?;
+        ensure_within_root(&mount.host_path, &canonical)?;
     }
 
     #[cfg(unix)]
@@ -1627,10 +1812,10 @@ fn host_get_mode(root: &Path, path: &str) -> Result<u32, SandboxError> {
     }
 }
 
-fn host_set_mode(root: &Path, path: &str, mode: u32) -> Result<(), SandboxError> {
-    let normalized = normalize_workspace_path(path)?;
-    let candidate = root.join(sandbox_to_workspace_relative(&normalized)?);
-    validate_existing_ancestor(root, &candidate, false)?;
+fn host_set_mode(mounts: &HostMountTable, path: &str, mode: u32) -> Result<(), SandboxError> {
+    let (mount, normalized, relative) = mounts.resolve(path)?;
+    let candidate = mount.host_path.join(relative);
+    validate_existing_ancestor(&mount.host_path, &candidate, false)?;
     let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             SandboxError::InvalidRequest(format!("path does not exist: {normalized}"))
@@ -1644,7 +1829,7 @@ fn host_set_mode(root: &Path, path: &str, mode: u32) -> Result<(), SandboxError>
                 "host-backed path could not be resolved safely: {error}"
             ))
         })?;
-        ensure_within_root(root, &canonical)?;
+        ensure_within_root(&mount.host_path, &canonical)?;
     }
 
     #[cfg(unix)]
@@ -1664,20 +1849,19 @@ fn host_set_mode(root: &Path, path: &str, mode: u32) -> Result<(), SandboxError>
 }
 
 fn host_target_for_write(
-    root: &Path,
+    mounts: &HostMountTable,
     path: &str,
     create_parents: bool,
 ) -> Result<PathBuf, SandboxError> {
-    let normalized = normalize_workspace_path(path)?;
-    if normalized == "/workspace" {
+    let (mount, normalized, relative) = mounts.resolve(path)?;
+    if normalized == mount.sandbox_path {
         return Err(SandboxError::InvalidRequest(
-            "cannot write file contents to the workspace root".to_string(),
+            "cannot write file contents to a mount root".to_string(),
         ));
     }
 
-    let relative = sandbox_to_workspace_relative(&normalized)?;
-    let candidate = root.join(relative);
-    validate_existing_ancestor(root, &candidate, create_parents)?;
+    let candidate = mount.host_path.join(relative);
+    validate_existing_ancestor(&mount.host_path, &candidate, create_parents)?;
 
     if let Ok(metadata) = fs::symlink_metadata(&candidate) {
         if metadata.file_type().is_symlink() {
@@ -1686,7 +1870,7 @@ fn host_target_for_write(
                     "symlink targets must remain inside the workspace root: {error}"
                 ))
             })?;
-            ensure_within_root(root, &canonical)?;
+            ensure_within_root(&mount.host_path, &canonical)?;
         } else if metadata.is_dir() {
             return Err(SandboxError::InvalidRequest(format!(
                 "path is a directory: {normalized}"
@@ -1698,22 +1882,22 @@ fn host_target_for_write(
 }
 
 fn host_target_for_directory(
-    root: &Path,
+    mounts: &HostMountTable,
     path: &str,
     parents: bool,
 ) -> Result<PathBuf, SandboxError> {
-    let normalized = normalize_workspace_path(path)?;
-    if normalized == "/workspace" {
-        return Ok(root.to_path_buf());
+    let (mount, normalized, relative) = mounts.resolve(path)?;
+    if normalized == mount.sandbox_path {
+        return Ok(mount.host_path.clone());
     }
-    let candidate = root.join(sandbox_to_workspace_relative(&normalized)?);
-    validate_existing_ancestor(root, &candidate, parents)?;
+    let candidate = mount.host_path.join(relative);
+    validate_existing_ancestor(&mount.host_path, &candidate, parents)?;
     Ok(candidate)
 }
 
-fn list_host_paths(root: &Path) -> Result<Vec<String>, SandboxError> {
-    let mut paths = vec!["/".to_string(), "/workspace".to_string()];
-    let mut stack = vec![(root.to_path_buf(), "/workspace".to_string())];
+fn list_host_paths_for_mount(root: &Path, sandbox_root: &str) -> Result<Vec<String>, SandboxError> {
+    let mut paths = Vec::new();
+    let mut stack = vec![(root.to_path_buf(), sandbox_root.to_string())];
 
     while let Some((host_dir, sandbox_dir)) = stack.pop() {
         let entries = fs::read_dir(&host_dir).map_err(|error| {
@@ -1795,6 +1979,7 @@ fn validate_existing_ancestor(
 
 fn normalize_link_target(
     root: &Path,
+    sandbox_root: &str,
     parent: &Path,
     target: &Path,
 ) -> Result<String, SandboxError> {
@@ -1810,9 +1995,9 @@ fn normalize_link_target(
         SandboxError::PolicyDenied("symlink target escapes the workspace root".to_string())
     })?;
     if relative.as_os_str().is_empty() {
-        Ok("/workspace".to_string())
+        Ok(sandbox_root.to_string())
     } else {
-        Ok(format!("/workspace/{}", relative.display()))
+        Ok(format!("{sandbox_root}/{}", relative.display()))
     }
 }
 
@@ -1943,8 +2128,13 @@ mod tests {
         fs::create_dir_all(root.path().join("notes")).unwrap();
         fs::write(root.path().join("notes/demo.txt"), b"host").unwrap();
 
-        let mut filesystem =
-            HostCowFilesystem::new(fs::canonicalize(root.path()).unwrap()).unwrap();
+        let mounts = HostMountTable {
+            mounts: vec![ResolvedHostMount {
+                sandbox_path: "/workspace".to_string(),
+                host_path: fs::canonicalize(root.path()).unwrap(),
+            }],
+        };
+        let mut filesystem = HostCowFilesystem::new(mounts).unwrap();
         filesystem
             .write_file("/workspace/notes/demo.txt", b"overlay".to_vec(), false)
             .unwrap();
@@ -1965,11 +2155,14 @@ mod tests {
         fs::create_dir_all(root.path().join("allowed")).unwrap();
         fs::create_dir_all(root.path().join("blocked")).unwrap();
 
-        let mut filesystem = HostReadwriteFilesystem::new(
-            fs::canonicalize(root.path()).unwrap(),
-            vec!["/workspace/allowed".to_string()],
-        )
-        .unwrap();
+        let mounts = HostMountTable {
+            mounts: vec![ResolvedHostMount {
+                sandbox_path: "/workspace".to_string(),
+                host_path: fs::canonicalize(root.path()).unwrap(),
+            }],
+        };
+        let mut filesystem =
+            HostReadwriteFilesystem::new(mounts, vec!["/workspace/allowed".to_string()]).unwrap();
 
         let error = filesystem
             .write_file("/workspace/blocked/demo.txt", b"nope".to_vec(), false)
@@ -1986,8 +2179,13 @@ mod tests {
 
         #[cfg(unix)]
         {
-            let error = host_exists(&fs::canonicalize(root.path()).unwrap(), "/workspace/escape")
-                .unwrap_err();
+            let mounts = HostMountTable {
+                mounts: vec![ResolvedHostMount {
+                    sandbox_path: "/workspace".to_string(),
+                    host_path: fs::canonicalize(root.path()).unwrap(),
+                }],
+            };
+            let error = host_exists(&mounts, "/workspace/escape").unwrap_err();
             assert_eq!(error.kind(), ErrorKind::PolicyDenied);
         }
     }
@@ -1995,7 +2193,13 @@ mod tests {
     #[test]
     fn normalize_writable_roots_requires_workspace_prefix() {
         let roots = BTreeSet::from(["/tmp".to_string()]);
-        let error = normalize_writable_roots(&roots).unwrap_err();
+        let mounts = HostMountTable {
+            mounts: vec![ResolvedHostMount {
+                sandbox_path: "/workspace".to_string(),
+                host_path: tempdir().path().to_path_buf(),
+            }],
+        };
+        let error = normalize_writable_roots(&mounts, &roots).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::PolicyDenied);
     }
 }

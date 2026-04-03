@@ -8,6 +8,7 @@ class NativeSandbox:
         allowlisted_commands: Sequence[str],
         session_state: str,
         workspace_root: str | None = None,
+        host_mounts: list[tuple[str, str]] | None = None,
         writable_roots: list[str] | None = None,
         network_policy_json: str | None = None,
         event_callback: object | None = None,

@@ -37,8 +37,8 @@ This is the next largest architectural difference.
 
 Current `abash` state:
 
-- one `/workspace` mount
-- current host-backed modes are deliberate and narrow
+- explicit multi-mount host configuration is now supported, while legacy `workspace_root="/workspace"` remains as compat sugar
+- current host-backed modes are still deliberate and narrow
 
 Current `just-bash` shape:
 
@@ -48,9 +48,8 @@ Current `just-bash` shape:
 
 Recommended work:
 
-1. support multiple mounts explicitly
-2. add lazy file-provider hooks for on-demand content
-3. keep current path and policy guarantees intact while broadening mount shape
+1. add lazy file-provider hooks for on-demand content
+2. keep current path and policy guarantees intact while broadening mount shape
 
 Why second:
 

@@ -61,16 +61,17 @@ Command-name parity history is tracked in [docs/pending_commands.md](docs/pendin
 | Mode | Read Visibility | Write Behavior | Persistence | Host Mutation |
 | --- | --- | --- | --- | --- |
 | `memory` | sandbox-only virtual files | read/write inside sandbox | persists for one `Bash` session | never |
-| `host_readonly` | `/workspace` maps to one host directory | writes denied | reflects host state live | never |
-| `host_cow` | reads host files, overlay wins when modified | writes go to sandbox overlay only | persists for one `Bash` session | never |
-| `host_readwrite` | `/workspace` maps to one host directory | writes allowed only under explicit writable roots | reflects host state live | only under writable roots |
+| `host_readonly` | one or more sandbox mount points map to host directories | writes denied | reflects host state live | never |
+| `host_cow` | reads host files across configured mounts, overlay wins when modified | writes go to sandbox overlay only | persists for one `Bash` session | never |
+| `host_readwrite` | one or more sandbox mount points map to host directories | writes allowed only under explicit writable roots | reflects host state live | only under writable roots |
 
 ## Workspace Policy
 
-- Host-backed modes mount exactly one host directory at `/workspace`.
+- Host-backed modes can use legacy `workspace_root="/workspace"` or explicit `host_mounts=[HostMount(...)]`.
+- Writable roots still use sandbox paths, so multi-mount write policy stays explicit.
 - Path traversal outside the sandbox root is blocked.
-- Host-backed access outside `/workspace` is blocked.
-- Symlink resolution that escapes the configured workspace root is blocked by default.
+- Host-backed access outside configured mount paths is blocked.
+- Symlink resolution that escapes the configured host mount is blocked by default.
 - Python file helpers are embedding APIs; the intended agent workflow remains shell-first.
 
 ## Network Policy

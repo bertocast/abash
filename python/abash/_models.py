@@ -88,6 +88,12 @@ class NetworkPolicy:
 
 
 @dataclass(slots=True)
+class HostMount:
+    sandbox_path: str
+    host_path: str
+
+
+@dataclass(slots=True)
 class ExecutionRequest:
     mode: ExecutionMode = ExecutionMode.ARGV
     argv: list[str] | None = None
@@ -124,6 +130,7 @@ class BashOptions:
     filesystem_mode: FilesystemMode = FilesystemMode.MEMORY
     session_state: SessionState = SessionState.PERSISTENT
     workspace_root: str | None = None
+    host_mounts: list[HostMount] = field(default_factory=list)
     writable_roots: list[str] = field(default_factory=list)
     allowlisted_commands: list[str] = field(default_factory=list)
     network_policy: NetworkPolicy | None = None

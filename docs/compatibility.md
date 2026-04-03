@@ -17,7 +17,7 @@
 - optional Python event and audit callbacks with sanitized payloads
 - host-side custom command registration for argv mode and script-internal command dispatch, plus top-level pre/post execution hooks
 - filesystem session persistence for `memory` and `host_cow`
-- host-backed workspace modes with one `/workspace` mount
+- host-backed workspace modes with one legacy `/workspace` mount or explicit multi-mount configuration
 - scoped writable roots for `host_readwrite`
 - opt-in `session_state="per_exec"` shell-state reset between calls
 

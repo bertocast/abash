@@ -20,6 +20,7 @@ from abash import (
     ExecutionProfile,
     ExecutionResult,
     FilesystemMode,
+    HostMount,
     NetworkOrigin,
     NetworkPolicy,
     RunStatus,
@@ -2216,6 +2217,60 @@ async def test_host_readwrite_respects_writable_roots(tmp_path: Path) -> None:
 
     assert (workspace / "allowed" / "demo.txt").read_text(encoding="utf-8") == "ok"
     assert not (workspace / "blocked" / "demo.txt").exists()
+
+
+@pytest.mark.anyio
+async def test_host_readonly_supports_multiple_mounts(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    data = tmp_path / "data"
+    workspace.mkdir()
+    data.mkdir()
+    (workspace / "guide.txt").write_text("guide", encoding="utf-8")
+    (data / "report.txt").write_text("report", encoding="utf-8")
+
+    async with Bash(
+        profile=ExecutionProfile.WORKSPACE,
+        filesystem_mode=FilesystemMode.HOST_READONLY,
+        host_mounts=[
+            HostMount("/workspace", str(workspace)),
+            HostMount("/data", str(data)),
+        ],
+    ) as bash:
+        workspace_result = await bash.exec(["cat", "/workspace/guide.txt"])
+        data_result = await bash.exec(["cat", "/data/report.txt"])
+        listing = await bash.exec(["find", "/data", "-type", "f"])
+
+    assert workspace_result.stdout == "guide"
+    assert data_result.stdout == "report"
+    assert "/data/report.txt\n" in listing.stdout
+
+
+@pytest.mark.anyio
+async def test_host_readwrite_supports_multiple_mounts_and_non_workspace_default_cwd(
+    tmp_path: Path,
+) -> None:
+    data = tmp_path / "mounted-data"
+    logs = tmp_path / "mounted-logs"
+    data.mkdir()
+    logs.mkdir()
+
+    async with Bash(
+        profile=ExecutionProfile.WORKSPACE,
+        filesystem_mode=FilesystemMode.HOST_READWRITE,
+        host_mounts=[
+            HostMount("/data", str(data)),
+            HostMount("/logs", str(logs)),
+        ],
+        writable_roots=["/logs"],
+    ) as bash:
+        pwd_result = await bash.exec(["pwd"])
+        await bash.write_file("/logs/app.log", "ok")
+        with pytest.raises(ValueError):
+            await bash.write_file("/data/app.log", "blocked")
+
+    assert pwd_result.stdout == "/data\n"
+    assert (logs / "app.log").read_text(encoding="utf-8") == "ok"
+    assert not (data / "app.log").exists()
 
 
 @pytest.mark.anyio

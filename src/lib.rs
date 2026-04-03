@@ -2,9 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{atomic::AtomicBool, Arc};
 
 use abash_core::{
-    default_cwd_for_mode, normalize_sandbox_path as core_normalize_sandbox_path,
-    parse_network_policy_json, ExecutionMode, ExecutionProfile, ExecutionRequest, FilesystemMode,
-    SandboxConfig, SandboxError, SandboxSession, SessionBackend, SessionState,
+    default_cwd_for_host_mounts, default_cwd_for_mode,
+    normalize_sandbox_path as core_normalize_sandbox_path, parse_network_policy_json,
+    ExecutionMode, ExecutionProfile, ExecutionRequest, FilesystemMode, HostMount, SandboxConfig,
+    SandboxError, SandboxSession, SessionBackend, SessionState,
 };
 use parking_lot::Mutex;
 use pyo3::exceptions::PyValueError;
@@ -37,6 +38,7 @@ impl NativeSandbox {
         allowlisted_commands,
         session_state="persistent",
         workspace_root=None,
+        host_mounts=None,
         writable_roots=None,
         network_policy_json=None,
         event_callback=None,
@@ -52,6 +54,7 @@ impl NativeSandbox {
         allowlisted_commands: Vec<String>,
         session_state: &str,
         workspace_root: Option<String>,
+        host_mounts: Option<Vec<(String, String)>>,
         writable_roots: Option<Vec<String>>,
         network_policy_json: Option<String>,
         event_callback: Option<Py<PyAny>>,
@@ -72,13 +75,23 @@ impl NativeSandbox {
             allowlisted_commands.into_iter().collect::<BTreeSet<_>>()
         };
 
+        let host_mounts = parse_host_mounts(host_mounts);
         let config = SandboxConfig {
             profile: profile.clone(),
             filesystem_mode: filesystem_mode.clone(),
             session_state,
             allowlisted_commands,
-            default_cwd: default_cwd_for_mode(&filesystem_mode).to_string(),
+            default_cwd: if workspace_root.is_some() || !host_mounts.is_empty() {
+                default_cwd_for_host_mounts(
+                    workspace_root.as_deref().map(std::path::Path::new),
+                    &host_mounts,
+                    &filesystem_mode,
+                )
+            } else {
+                default_cwd_for_mode(&filesystem_mode).to_string()
+            },
             workspace_root: workspace_root.map(Into::into),
+            host_mounts,
             writable_roots: writable_roots
                 .unwrap_or_default()
                 .into_iter()
@@ -432,6 +445,17 @@ fn build_backend(config: &SandboxConfig) -> PyResult<Box<dyn SessionBackend>> {
             abash_backend_nsjail::create_session(config.clone()).map_err(to_py_err)
         }
     }
+}
+
+fn parse_host_mounts(host_mounts: Option<Vec<(String, String)>>) -> Vec<HostMount> {
+    host_mounts
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(sandbox_path, host_path)| HostMount {
+            sandbox_path,
+            host_path: host_path.into(),
+        })
+        .collect()
 }
 
 fn build_request(

@@ -4828,6 +4828,7 @@ mod tests {
             .collect::<BTreeSet<_>>(),
             default_cwd: "/".to_string(),
             workspace_root: None,
+            host_mounts: Vec::new(),
             writable_roots: BTreeSet::new(),
             network_policy: None,
         }
@@ -4976,6 +4977,7 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             default_cwd: "/workspace".to_string(),
             workspace_root: Some(workspace.path().to_path_buf()),
+            host_mounts: Vec::new(),
             writable_roots: BTreeSet::new(),
             network_policy: None,
         };

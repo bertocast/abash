@@ -17,6 +17,7 @@ from ._models import (
     ExecutionRequest,
     ExecutionResult,
     FilesystemMode,
+    HostMount,
     NetworkPolicy,
     RunEvent,
     RunStatus,
@@ -246,6 +247,12 @@ def _network_policy_json(policy: NetworkPolicy | None) -> str | None:
     return json.dumps(asdict(policy))
 
 
+def _native_host_mounts(host_mounts: list[HostMount]) -> list[tuple[str, str]] | None:
+    if not host_mounts:
+        return None
+    return [(mount.sandbox_path, mount.host_path) for mount in host_mounts]
+
+
 def _wrap_event_callback(
     callback: Callable[[RunEvent], None] | None,
 ) -> Callable[[dict[str, object]], None] | None:
@@ -378,6 +385,7 @@ class Bash:
         filesystem_mode: FilesystemMode = FilesystemMode.MEMORY,
         session_state: SessionState = SessionState.PERSISTENT,
         workspace_root: str | None = None,
+        host_mounts: Iterable[HostMount] | None = None,
         writable_roots: Iterable[str] | None = None,
         allowlisted_commands: Iterable[str] | None = None,
         network_policy: NetworkPolicy | None = None,
@@ -399,6 +407,7 @@ class Bash:
             filesystem_mode=filesystem_mode,
             session_state=session_state,
             workspace_root=workspace_root,
+            host_mounts=list(host_mounts or ()),
             writable_roots=list(writable_roots or ()),
             allowlisted_commands=list(allowlisted_commands or ()),
             network_policy=network_policy,
@@ -420,6 +429,7 @@ class Bash:
             commands,
             options.session_state.value,
             options.workspace_root,
+            _native_host_mounts(options.host_mounts),
             list(options.writable_roots),
             _network_policy_json(options.network_policy),
             self._event_callback_bridge,
@@ -434,6 +444,7 @@ class Bash:
             filesystem_mode=options.filesystem_mode,
             session_state=options.session_state,
             workspace_root=options.workspace_root,
+            host_mounts=list(options.host_mounts),
             writable_roots=list(options.writable_roots),
             allowlisted_commands=commands,
             network_policy=options.network_policy,
@@ -453,6 +464,7 @@ class Bash:
         filesystem_mode: FilesystemMode = FilesystemMode.MEMORY,
         session_state: SessionState = SessionState.PERSISTENT,
         workspace_root: str | None = None,
+        host_mounts: Iterable[HostMount] | None = None,
         writable_roots: Iterable[str] | None = None,
         allowlisted_commands: Iterable[str] | None = None,
         network_policy: NetworkPolicy | None = None,
@@ -473,6 +485,7 @@ class Bash:
             filesystem_mode=filesystem_mode,
             session_state=session_state,
             workspace_root=workspace_root,
+            host_mounts=host_mounts,
             writable_roots=writable_roots,
             allowlisted_commands=allowlisted_commands,
             network_policy=network_policy,
