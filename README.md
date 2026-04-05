@@ -10,7 +10,7 @@ This repository is initialized through **Phase 5 v1** for workspace-aware filesy
 - The security-sensitive execution core lives in Rust.
 - The default execution profile is the **virtual safe profile**.
 - Host-backed filesystem access is available only through the **workspace profile**.
-- Real shell execution is **Linux-only by design** and **not active in this bootstrap**.
+- Real shell execution is **Linux-only by design** and now activates only through the narrow `nsjail` backend path.
 
 ## Trust Boundary
 
@@ -121,7 +121,7 @@ Command-name parity history is tracked in [docs/pending_commands.md](docs/pendin
 - detached runs can queue, but shell mutation still serializes through one session lock
 - `host_cow` still does not support deleting host-backed paths or whiteout semantics
 - script compatibility is intentionally narrow and not full bash parity
-- the `nsjail` backend is reserved for later Linux integration and currently returns explicit unsupported errors
+- the `nsjail` backend is now a narrow Linux-only argv backend; it still requires an explicit `nsjail` binary, host-backed mounts, and keeps script/network work out of scope for now
 
 ## Repository Layout
 

@@ -5,13 +5,26 @@ use abash_core::{
     SessionBackend,
 };
 
-pub fn create_session(_config: SandboxConfig) -> Result<Box<dyn SessionBackend>, SandboxError> {
-    Ok(Box::new(NsjailSession))
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+mod linux_mounts;
+
+#[cfg(target_os = "linux")]
+pub fn create_session(config: SandboxConfig) -> Result<Box<dyn SessionBackend>, SandboxError> {
+    linux::create_session(config)
 }
 
-struct NsjailSession;
+#[cfg(not(target_os = "linux"))]
+pub fn create_session(_config: SandboxConfig) -> Result<Box<dyn SessionBackend>, SandboxError> {
+    Ok(Box::new(UnsupportedNsjailSession))
+}
 
-impl SessionBackend for NsjailSession {
+#[cfg(not(target_os = "linux"))]
+struct UnsupportedNsjailSession;
+
+#[cfg(not(target_os = "linux"))]
+impl SessionBackend for UnsupportedNsjailSession {
     fn name(&self) -> &'static str {
         "nsjail"
     }
@@ -24,17 +37,8 @@ impl SessionBackend for NsjailSession {
         _extensions: Option<Arc<dyn SandboxExtensions>>,
     ) -> Result<ExecutionResult, SandboxError> {
         Err(SandboxError::UnsupportedFeature(
-            backend_message().to_string(),
+            "real-shell execution is Linux-only and the nsjail backend is not available on this platform"
+                .to_string(),
         ))
     }
-}
-
-#[cfg(target_os = "linux")]
-fn backend_message() -> &'static str {
-    "real-shell execution is reserved for Linux nsjail integration and is not implemented in bootstrap"
-}
-
-#[cfg(not(target_os = "linux"))]
-fn backend_message() -> &'static str {
-    "real-shell execution is Linux-only and the nsjail backend is not available on this platform"
 }

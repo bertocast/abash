@@ -5,6 +5,7 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import re
+import sys
 import tarfile
 import threading
 
@@ -2826,3 +2827,23 @@ async def test_curl_blocks_private_ranges_by_default() -> None:
 
     assert result.error is not None
     assert result.error.kind is ErrorKind.POLICY_DENIED
+
+
+@pytest.mark.anyio
+async def test_real_shell_profile_remains_explicitly_unsupported_off_linux(
+    tmp_path: Path,
+) -> None:
+    if sys.platform == "linux":
+        pytest.skip("linux behavior depends on nsjail availability")
+
+    async with Bash(
+        profile=ExecutionProfile.REAL_SHELL,
+        filesystem_mode=FilesystemMode.HOST_READONLY,
+        workspace_root=str(tmp_path),
+        allowlisted_commands=["bash"],
+    ) as bash:
+        result = await bash.exec(["bash", "-lc", "echo hi"])
+
+    assert result.error is not None
+    assert result.error.kind is ErrorKind.UNSUPPORTED_FEATURE
+    assert "Linux-only" in result.error.message

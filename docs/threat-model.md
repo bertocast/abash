@@ -40,4 +40,4 @@
 - script mode is a constrained interpreter layer, not a pass-through to host bash
 - copy-on-write overlay does not yet model deletion semantics
 - detached execution exists only as an in-process, single-active-run handle model with buffered observability
-- real-shell isolation is not implemented yet and must not be inferred from crate presence alone
+- Linux real-shell execution now exists only through a narrow `nsjail` argv path; broader shell/script/network semantics still must not be inferred from crate presence alone

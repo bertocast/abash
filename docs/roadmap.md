@@ -50,7 +50,7 @@ Command-name parity with `just-bash` is done. The remaining work is mostly behav
 
 ### Tier 4: Backend Maturity
 
-- [ ] activate the Linux real-shell backend behind the intended isolation model
+- [x] activate the Linux real-shell backend behind the intended isolation model
 - [ ] define the long-term story for `nsjail` vs any alternative Linux sandbox strategy
 - [ ] decide whether a stronger JavaScript isolation mode is worth adding alongside host-runtime `js-exec`
 

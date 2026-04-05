@@ -127,8 +127,13 @@
 
 ## Modeled but Not Implemented
 
-- real-shell backend execution
-- multi-mount host filesystem composition
+- stronger Linux sandbox strategy decisions beyond the current narrow `nsjail` path
+
+## Limited Real-Shell Support
+
+- Linux-only `real_shell` sessions can now execute argv requests through `nsjail`
+- current real-shell scope is intentionally narrow: argv only, host-backed mounts only, explicit `nsjail` binary required
+- script-mode dispatch, network-enabled runs, and per-request filesystem overrides are still rejected on that backend
 
 ## Not Claimed
 

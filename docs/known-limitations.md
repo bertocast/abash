@@ -1,7 +1,7 @@
 # Known Limitations
 
 - `script` execution is intentionally partial and currently supports only simple commands, quoting, comments, `|`, `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, `;`, `&&`, `||`, minimal `if ... then ... [elif] ... [else] ... fi`, `case ... in ... esac`, subshell blocks `( ... )`, `while ... do ... done`, `until ... do ... done`, `for ... do ... done`, narrow `name() { ... }` functions, narrow `local`, `return`, `break`, `continue`, script-scoped assignment statements, command-local assignments, `$NAME` / `${NAME}` / `${NAME:-default}` / `$1` / `$2` / `$@` / `$#` expansion, narrow `$()` command substitution, and argument globbing with `*`, `?`, and bracket classes
-- only the virtual safe backend is functional in the bootstrap
+- the virtual safe backend is still the mainline path; the Linux `nsjail` backend is now only a narrow argv-only execution path
 - only a narrow set of builtins is implemented: `echo`, `cd`, `export`, `expr`, `time`, `timeout`, `whoami`, `hostname`, `help`, `clear`, `history`, `alias`, `unalias`, `bash`, `sh`, `env`, `which`, `dirname`, `basename`, `curl`, `tree`, `stat`, `du`, `file`, `readlink`, `ln`, `pwd`, `printenv`, `cat`, `grep`, `egrep`, `fgrep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, `tr`, `paste`, `sed`, `join`, `awk`, `jq`, `yq`, `sqlite3`, `find`, `ls`, `rev`, `nl`, `tac`, `strings`, `fold`, `expand`, `unexpand`, `html-to-markdown`, `rm`, `rmdir`, `cp`, `mv`, `comm`, `diff`, `column`, `chmod`, `python`, `python3`, `js-exec`, `xan`, `xargs`, `rg`, `split`, `od`, `base64`, `md5sum`, `sha1sum`, `sha256sum`, `gzip`, `gunzip`, `zcat`, `tar`, `tee`, `printf`, `seq`, `date`, `mkdir`, `touch`, `true`, `false`, `sleep`
 - host-backed filesystem support accepts explicit multi-mount configuration, and that remains the main product line; broader mount adapter abstractions stay out of scope for now
 - lazy file providers can now surface listing metadata for `find`, `ls`, `tree`, `exists()`, and `read_file()`, but providers without `list_paths()` still only participate in direct reads
@@ -9,6 +9,8 @@
 - host-side file helpers are embedding APIs and are not intended to replace shell-first agent workflows
 - network remains zero-trust by default; `curl` only works with explicit network policy plus per-exec `network_enabled=True`
 - detached runs are in-process only and are lost if the embedding interpreter exits
+- `real_shell` currently requires Linux plus an explicit `nsjail` binary on `PATH` or `ABASH_NSJAIL_BIN`
+- the current real-shell backend only supports argv execution with host-backed mounts, and still rejects script mode, network-enabled runs, and per-request filesystem-mode changes
 - multiple detached runs can be created per `Bash` session, but execution still serializes through one session lock to preserve stateful shell semantics
 - `BashRun.stream_events()` and `stream_output()` are live at the run-event level, but stdout/stderr are still emitted as buffered chunks rather than byte-streamed process pipes
 - custom commands can run inside script dispatch, can receive `CustomCommandContext`, and can delegate one nested `exec()` / `exec_script()` request, but top-level hooks still only apply at the outer request boundary and AST rewrite plugins are still out of scope
