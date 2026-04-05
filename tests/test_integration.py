@@ -348,6 +348,29 @@ async def test_script_mode_rejects_break_outside_loops() -> None:
 
 
 @pytest.mark.anyio
+async def test_script_mode_supports_command_substitution() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script("name=$(printf bert); echo $name $(printf core)")
+
+    assert result.exit_code == 0
+    assert result.stdout == "bert core\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_supports_subshell_isolation() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/demo/inner", parents=True)
+        result = await bash.exec_script(
+            "(cd /workspace/demo/inner; pwd; touch /workspace/demo/flag.txt); pwd; ls /workspace/demo"
+        )
+        flag_exists = await bash.exists("/workspace/demo/flag.txt")
+
+    assert result.exit_code == 0
+    assert result.stdout == "/workspace/demo/inner\n/\nflag.txt\ninner\n"
+    assert flag_exists is True
+
+
+@pytest.mark.anyio
 async def test_argv_mode_text_builtins_support_stdin_and_exit_codes() -> None:
     async with Bash() as bash:
         grep_hit = await bash.exec(["grep", "beta"], stdin="alpha\nbeta\n")

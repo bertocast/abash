@@ -60,7 +60,7 @@ use abash_core::{
 use script::{
     is_valid_assignment_name, parse_script, CaseBlock, ChainOp, ControlStep, ForBlock, FunctionDef,
     IfBlock, Pipeline, RedirectSpec, ReturnStep, ScriptStep, ScriptWord, SimpleCommand, StepKind,
-    WhileBlock,
+    SubshellBlock, WhileBlock,
 };
 use ureq::{http, Agent, RequestExt};
 use url::Url;
@@ -463,6 +463,19 @@ impl VirtualSession {
                     script_stdin,
                     state,
                 )?,
+                StepKind::Subshell(block) => self.run_subshell_block(
+                    runtime,
+                    block,
+                    config,
+                    cancel_flag,
+                    timeout_ms,
+                    started,
+                    network_enabled,
+                    extensions,
+                    base_metadata,
+                    script_stdin,
+                    state,
+                )?,
                 StepKind::While(block) => self.run_while_block(
                     runtime,
                     block,
@@ -654,9 +667,18 @@ impl VirtualSession {
         script_stdin: &mut Option<Vec<u8>>,
         state: &mut ScriptState,
     ) -> Result<(), ScriptSignal> {
-        let subject = block
-            .subject
-            .expand(&runtime.env, &runtime.positional_args)
+        let subject = self
+            .expand_script_word(
+                runtime,
+                &block.subject,
+                config,
+                cancel_flag,
+                timeout_ms,
+                started,
+                network_enabled,
+                extensions,
+                base_metadata,
+            )
             .map_err(|error| {
                 let mut failed = ExecutionResult::failure(error, self.base_metadata(&runtime.cwd));
                 failed.stdout = state.stdout.clone();
@@ -667,8 +689,18 @@ impl VirtualSession {
         for arm in &block.arms {
             let mut matched = false;
             for pattern in &arm.patterns {
-                let expanded = pattern
-                    .expand(&runtime.env, &runtime.positional_args)
+                let expanded = self
+                    .expand_script_word(
+                        runtime,
+                        pattern,
+                        config,
+                        cancel_flag,
+                        timeout_ms,
+                        started,
+                        network_enabled,
+                        extensions,
+                        base_metadata,
+                    )
                     .map_err(|error| {
                         let mut failed =
                             ExecutionResult::failure(error, self.base_metadata(&runtime.cwd));
@@ -721,6 +753,51 @@ impl VirtualSession {
             Vec::new(),
             self.command_metadata(&runtime.cwd, base_metadata.clone(), "case"),
         ));
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_subshell_block(
+        &mut self,
+        runtime: &mut RuntimeState,
+        block: &SubshellBlock,
+        config: &SandboxConfig,
+        cancel_flag: &AtomicBool,
+        timeout_ms: Option<u64>,
+        started: Instant,
+        network_enabled: bool,
+        extensions: Option<&dyn SandboxExtensions>,
+        base_metadata: &BTreeMap<String, String>,
+        script_stdin: &mut Option<Vec<u8>>,
+        state: &mut ScriptState,
+    ) -> Result<(), ScriptSignal> {
+        let mut child = runtime.child();
+        let mut child_state = ScriptState::default();
+        if let Err(mut signal) = self.run_steps(
+            &mut child,
+            &block.body_steps,
+            config,
+            cancel_flag,
+            timeout_ms,
+            started,
+            network_enabled,
+            extensions,
+            base_metadata,
+            script_stdin,
+            &mut child_state,
+        ) {
+            state.merge(child_state);
+            signal.apply_state(state);
+            return Err(signal);
+        }
+
+        state.merge(child_state);
+        if state.last_result.is_none() {
+            state.last_result = Some(ExecutionResult::success(
+                Vec::new(),
+                self.command_metadata(&runtime.cwd, base_metadata.clone(), "subshell"),
+            ));
+        }
         Ok(())
     }
 
@@ -959,7 +1036,18 @@ impl VirtualSession {
         let items = if block.items.is_empty() {
             runtime.positional_args.clone()
         } else {
-            expand_words(&block.items, &runtime.env, &runtime.positional_args).map_err(|error| {
+            self.expand_script_words(
+                runtime,
+                &block.items,
+                config,
+                cancel_flag,
+                timeout_ms,
+                started,
+                network_enabled,
+                extensions,
+                base_metadata,
+            )
+            .map_err(|error| {
                 let mut failed = ExecutionResult::failure(error, self.base_metadata(&runtime.cwd));
                 failed.stdout = state.stdout.clone();
                 failed.stderr = state.stderr.clone();
@@ -1065,10 +1153,32 @@ impl VirtualSession {
 
         for (index, command) in pipeline.commands.iter().enumerate() {
             validate_pipeline_redirections(pipeline, index, command)?;
-            let command_env =
-                expand_command_env(&command.assignments, &runtime.env, &runtime.positional_args)?;
-            let expanded_argv =
-                expand_words(&command.argv, &command_env, &runtime.positional_args)?;
+            let command_env = self.expand_command_env_runtime(
+                runtime,
+                &command.assignments,
+                config,
+                cancel_flag,
+                timeout_ms,
+                started,
+                network_enabled,
+                extensions,
+                base_metadata,
+            )?;
+            let command_runtime = RuntimeState {
+                env: command_env.clone(),
+                ..runtime.clone()
+            };
+            let expanded_argv = self.expand_script_words(
+                &command_runtime,
+                &command.argv,
+                config,
+                cancel_flag,
+                timeout_ms,
+                started,
+                network_enabled,
+                extensions,
+                base_metadata,
+            )?;
             if expanded_argv.is_empty() {
                 if pipeline.commands.len() > 1 {
                     return Err(SandboxError::InvalidRequest(
@@ -1802,6 +1912,156 @@ impl VirtualSession {
             .metadata
             .insert(CONTROL_LEVELS_METADATA_KEY.to_string(), levels.to_string());
         result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn expand_script_word(
+        &mut self,
+        runtime: &RuntimeState,
+        word: &ScriptWord,
+        config: &SandboxConfig,
+        cancel_flag: &AtomicBool,
+        timeout_ms: Option<u64>,
+        started: Instant,
+        network_enabled: bool,
+        extensions: Option<&dyn SandboxExtensions>,
+        base_metadata: &BTreeMap<String, String>,
+    ) -> Result<String, SandboxError> {
+        let expanded = word.expand(&runtime.env, &runtime.positional_args)?;
+        self.substitute_command_outputs(
+            runtime,
+            &expanded,
+            config,
+            cancel_flag,
+            timeout_ms,
+            started,
+            network_enabled,
+            extensions,
+            base_metadata,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn expand_script_words(
+        &mut self,
+        runtime: &RuntimeState,
+        words: &[ScriptWord],
+        config: &SandboxConfig,
+        cancel_flag: &AtomicBool,
+        timeout_ms: Option<u64>,
+        started: Instant,
+        network_enabled: bool,
+        extensions: Option<&dyn SandboxExtensions>,
+        base_metadata: &BTreeMap<String, String>,
+    ) -> Result<Vec<String>, SandboxError> {
+        let mut expanded = Vec::new();
+        for word in words {
+            if word.expands_to_positional_args() {
+                expanded.extend(runtime.positional_args.iter().cloned());
+            } else {
+                expanded.push(self.expand_script_word(
+                    runtime,
+                    word,
+                    config,
+                    cancel_flag,
+                    timeout_ms,
+                    started,
+                    network_enabled,
+                    extensions,
+                    base_metadata,
+                )?);
+            }
+        }
+        Ok(expanded)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn expand_command_env_runtime(
+        &mut self,
+        runtime: &RuntimeState,
+        assignments: &[(String, ScriptWord)],
+        config: &SandboxConfig,
+        cancel_flag: &AtomicBool,
+        timeout_ms: Option<u64>,
+        started: Instant,
+        network_enabled: bool,
+        extensions: Option<&dyn SandboxExtensions>,
+        base_metadata: &BTreeMap<String, String>,
+    ) -> Result<BTreeMap<String, String>, SandboxError> {
+        let mut env = runtime.env.clone();
+        let expansion_runtime = RuntimeState {
+            env: env.clone(),
+            ..runtime.clone()
+        };
+        let mut current_runtime = expansion_runtime;
+        for (name, value) in assignments {
+            let expanded = self.expand_script_word(
+                &current_runtime,
+                value,
+                config,
+                cancel_flag,
+                timeout_ms,
+                started,
+                network_enabled,
+                extensions,
+                base_metadata,
+            )?;
+            env.insert(name.clone(), expanded);
+            current_runtime.env = env.clone();
+        }
+        Ok(env)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn substitute_command_outputs(
+        &mut self,
+        runtime: &RuntimeState,
+        text: &str,
+        config: &SandboxConfig,
+        cancel_flag: &AtomicBool,
+        timeout_ms: Option<u64>,
+        started: Instant,
+        network_enabled: bool,
+        extensions: Option<&dyn SandboxExtensions>,
+        base_metadata: &BTreeMap<String, String>,
+    ) -> Result<String, SandboxError> {
+        let mut output = String::new();
+        let mut index = 0usize;
+
+        while let Some(relative) = text[index..].find("$(") {
+            let start = index + relative;
+            output.push_str(&text[index..start]);
+            let (source, next_index) = extract_command_substitution(text, start)?;
+            let remaining_timeout = remaining_timeout_ms(timeout_ms, started)?;
+            let result = self.run_nested_script(
+                runtime,
+                source,
+                config,
+                cancel_flag,
+                extensions,
+                remaining_timeout,
+                network_enabled,
+                base_metadata.clone(),
+            )?;
+            if result.error.is_some() || result.exit_code != 0 {
+                let message = String::from_utf8_lossy(&result.stderr).trim().to_string();
+                return Err(SandboxError::InvalidRequest(if message.is_empty() {
+                    "command substitution failed".to_string()
+                } else {
+                    format!("command substitution failed: {message}")
+                }));
+            }
+            let stdout = String::from_utf8(result.stdout).map_err(|_| {
+                SandboxError::InvalidRequest(
+                    "command substitution currently requires UTF-8 stdout".to_string(),
+                )
+            })?;
+            output.push_str(stdout.trim_end_matches('\n'));
+            index = next_index;
+        }
+
+        output.push_str(&text[index..]);
+        Ok(output)
     }
 
     fn apply_redirects(
@@ -4555,6 +4815,82 @@ fn resolve_file_target(
     })
 }
 
+fn extract_command_substitution(text: &str, start: usize) -> Result<(String, usize), SandboxError> {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut index = text[..start].chars().count();
+    if chars.get(index) != Some(&'$') || chars.get(index + 1) != Some(&'(') {
+        return Err(SandboxError::InvalidRequest(
+            "invalid command substitution start".to_string(),
+        ));
+    }
+    index += 2;
+    let mut depth = 1usize;
+    let mut source = String::new();
+
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => {
+                source.push(chars[index]);
+                index += 1;
+                if index < chars.len() {
+                    source.push(chars[index]);
+                    index += 1;
+                }
+            }
+            '\'' | '"' => {
+                let quote = chars[index];
+                source.push(quote);
+                index += 1;
+                while index < chars.len() {
+                    let current = chars[index];
+                    source.push(current);
+                    index += 1;
+                    if current == '\\' && quote == '"' && index < chars.len() {
+                        source.push(chars[index]);
+                        index += 1;
+                        continue;
+                    }
+                    if current == quote {
+                        break;
+                    }
+                }
+            }
+            '$' if chars.get(index + 1) == Some(&'(') => {
+                depth += 1;
+                source.push('$');
+                source.push('(');
+                index += 2;
+            }
+            '(' => {
+                depth += 1;
+                source.push('(');
+                index += 1;
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok((
+                        source,
+                        text.char_indices()
+                            .nth(index + 1)
+                            .map_or(text.len(), |(offset, _)| offset),
+                    ));
+                }
+                source.push(')');
+                index += 1;
+            }
+            ch => {
+                source.push(ch);
+                index += 1;
+            }
+        }
+    }
+
+    Err(SandboxError::InvalidRequest(
+        "unterminated command substitution".to_string(),
+    ))
+}
+
 fn route_stream(
     routed: &mut RoutedOutput,
     pending_writes: &mut Vec<PendingFileWrite>,
@@ -4582,34 +4918,6 @@ fn route_stream(
             });
         }
     }
-}
-
-fn expand_command_env(
-    assignments: &[(String, ScriptWord)],
-    base_env: &BTreeMap<String, String>,
-    positional_args: &[String],
-) -> Result<BTreeMap<String, String>, SandboxError> {
-    let mut env = base_env.clone();
-    for (name, value) in assignments {
-        env.insert(name.clone(), value.expand(&env, positional_args)?);
-    }
-    Ok(env)
-}
-
-fn expand_words(
-    words: &[ScriptWord],
-    env: &BTreeMap<String, String>,
-    positional_args: &[String],
-) -> Result<Vec<String>, SandboxError> {
-    let mut expanded = Vec::new();
-    for word in words {
-        if word.expands_to_positional_args() {
-            expanded.extend(positional_args.iter().cloned());
-        } else {
-            expanded.push(word.expand(env, positional_args)?);
-        }
-    }
-    Ok(expanded)
 }
 
 fn resolve_alias_words(

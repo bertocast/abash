@@ -31,7 +31,7 @@
 - pipes (`|`): supported, buffered and sequential
 - redirects (`<`, `>`, `>>`, `2>`, `2>>`, `2>&1`): supported
 - command chaining (`;`, `&&`, `||`): supported
-- minimal control flow (`if ...; then ...; fi`, `elif`, optional `else`, `case ... in ... esac`, `while ...; do ...; done`, `until ...; do ...; done`, `for ...; do ...; done`): supported
+- minimal control flow (`if ...; then ...; fi`, `elif`, optional `else`, `case ... in ... esac`, subshell blocks `( ... )`, `while ...; do ...; done`, `until ...; do ...; done`, `for ...; do ...; done`): supported
 - narrow `name() { ...; }` functions plus `local`, `return`, `break`, and `continue`: supported
 - script-scoped assignment statements (`NAME=value; echo $NAME`): supported
 - command-local assignment prefixes (`FOO=bar cmd`): supported
@@ -106,9 +106,9 @@
 - unmatched glob patterns: preserved literally
 - shell variables do not persist across separate exec calls: by design
 - command-name globbing: not implemented
-- command substitution: not implemented
-- subshell execution: not implemented
-- subshells / command substitution: not implemented
+- narrow `$()` command substitution: supported
+- subshell execution `( ... )`: supported
+- backtick command substitution: not implemented
 - broader fd juggling beyond `2>`, `2>>`, `2>&1`: not implemented
 
 ## Filesystem Matrix

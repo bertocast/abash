@@ -105,12 +105,12 @@ Command-name parity history is tracked in [docs/pending_commands.md](docs/pendin
 ## Script Compatibility
 
 - Script mode is intentionally partial, not bash-complete.
-- Supported today: simple commands, quoting, comments, `|`, `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, `;`, `&&`, `||`, `if ...; then ...; fi`, `if ...; then ...; elif ...; then ...; else ...; fi`, `case ... in ... esac`, `while ...; do ...; done`, `until ...; do ...; done`, `for ...; do ...; done`, narrow `name() { ...; }` functions, narrow `local`, `return`, `break`, `continue`, script-scoped assignment statements, command-local assignment prefixes, `$NAME`, `${NAME}`, `${NAME:-default}`, `$1`, `$2`, `$@`, `$#` expansion, and argument globbing with `*`, `?`, and bracket classes.
+- Supported today: simple commands, quoting, comments, `|`, `<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, `;`, `&&`, `||`, `if ...; then ...; fi`, `if ...; then ...; elif ...; then ...; else ...; fi`, `case ... in ... esac`, subshell blocks `( ... )`, `while ...; do ...; done`, `until ...; do ...; done`, `for ...; do ...; done`, narrow `name() { ...; }` functions, narrow `local`, `return`, `break`, `continue`, script-scoped assignment statements, command-local assignment prefixes, `$NAME`, `${NAME}`, `${NAME:-default}`, `$1`, `$2`, `$@`, `$#`, narrow `$()` command substitution, and argument globbing with `*`, `?`, and bracket classes.
 - Pipeline execution is buffered and sequential inside the virtual backend; it is not a streaming process graph.
 - Variable expansion applies only in script mode, only for explicit request env plus script-scoped or command-local assignments, and does not expose host env.
 - Globbing currently applies only to expanded script arguments; command names and redirection targets stay literal.
 - Command behavior is intentionally narrow even when a command name exists. Examples: `env` supports only `-i` plus inline assignments, `tree` only `-a` and `-L`, `sed` only literal `s/old/new/` with optional `g`, `find` only `-name`, `-type`, and `-maxdepth`, `ls` only `-a` and `-l`, `rm` only `-f` and `-r`, `rg` only `-n`, `-l`, and `-i`, `html-to-markdown` only supports file-or-stdin conversion plus `--bullet`, `--code`, `--hr`, and `--heading-style`, `base64` only encode plus `-d`, and `date` only default output plus narrow `+FORMAT` tokens.
-- Unsupported today: shell variables that persist across separate exec calls, subshells, command substitution, broader fd juggling beyond `2>`, `2>>`, `2>&1`, job control, and TTY semantics.
+- Unsupported today: shell variables that persist across separate exec calls, backtick command substitution, broader fd juggling beyond `2>`, `2>>`, `2>&1`, job control, and TTY semantics.
 
 ## Current Limitations
 

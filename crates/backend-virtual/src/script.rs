@@ -42,6 +42,7 @@ pub(crate) enum StepKind {
     Pipeline(Pipeline),
     If(IfBlock),
     Case(CaseBlock),
+    Subshell(SubshellBlock),
     While(WhileBlock),
     Until(WhileBlock),
     For(ForBlock),
@@ -68,6 +69,11 @@ pub(crate) struct CaseBlock {
 pub(crate) struct CaseArm {
     pub patterns: Vec<ScriptWord>,
     pub steps: Vec<ScriptStep>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SubshellBlock {
+    pub body_steps: Vec<ScriptStep>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -220,6 +226,11 @@ fn tokenize(source: &str) -> Result<Vec<Token>, SandboxError> {
     let mut builder = WordBuilder::default();
 
     while let Some(ch) = chars.next() {
+        if builder.has_open_command_substitution() {
+            builder.push_char(ch, true, true);
+            continue;
+        }
+
         match ch {
             ' ' | '\t' | '\r' => builder.flush(&mut tokens),
             '\n' => {
@@ -332,9 +343,13 @@ fn tokenize(source: &str) -> Result<Vec<Token>, SandboxError> {
                 builder.flush(&mut tokens);
                 tokens.push(Token::LParen);
             }
-            ')' if builder.is_empty() => {
-                builder.flush(&mut tokens);
-                tokens.push(Token::RParen);
+            ')' => {
+                if builder.has_open_command_substitution() {
+                    builder.push_char(ch, true, true);
+                } else {
+                    builder.flush(&mut tokens);
+                    tokens.push(Token::RParen);
+                }
             }
             '{' if builder.is_empty() => {
                 builder.flush(&mut tokens);
@@ -395,6 +410,29 @@ impl WordBuilder {
 
     fn is_empty(&self) -> bool {
         self.parts.is_empty()
+    }
+
+    fn has_open_command_substitution(&self) -> bool {
+        let text = self
+            .parts
+            .iter()
+            .map(|part| part.text.as_str())
+            .collect::<String>();
+        let chars = text.chars().collect::<Vec<_>>();
+        let mut index = 0usize;
+        let mut depth = 0usize;
+        while index < chars.len() {
+            if chars[index] == '$' && chars.get(index + 1) == Some(&'(') {
+                depth += 1;
+                index += 2;
+                continue;
+            }
+            if chars[index] == ')' && depth > 0 {
+                depth -= 1;
+            }
+            index += 1;
+        }
+        depth > 0
     }
 }
 
@@ -484,6 +522,10 @@ impl Parser {
         }
         if self.consume_keyword("case") {
             return Ok(StepKind::Case(self.parse_case_block()?));
+        }
+        if matches!(self.peek(), Some(Token::LParen)) {
+            self.index += 1;
+            return Ok(StepKind::Subshell(self.parse_subshell_block()?));
         }
         if self.consume_keyword("while") {
             return Ok(StepKind::While(self.parse_while_block()?));
@@ -613,6 +655,17 @@ impl Parser {
         })
     }
 
+    fn parse_subshell_block(&mut self) -> Result<SubshellBlock, SandboxError> {
+        let body_steps = self.parse_steps_until_paren()?;
+        if body_steps.is_empty() {
+            return Err(SandboxError::InvalidRequest(
+                "subshells require at least one command".to_string(),
+            ));
+        }
+        self.expect_rparen()?;
+        Ok(SubshellBlock { body_steps })
+    }
+
     fn parse_for_block(&mut self) -> Result<ForBlock, SandboxError> {
         let Some(Token::Word(name_word)) = self.next() else {
             return Err(SandboxError::InvalidRequest(
@@ -668,10 +721,17 @@ impl Parser {
             unreachable!();
         };
         let raw_name = name_word.literal_value();
-        let name = raw_name.strip_suffix("()").ok_or_else(|| {
-            SandboxError::InvalidRequest("invalid function declaration".to_string())
-        })?;
-        if !is_valid_assignment_name(name) {
+        let name = if let Some(stripped) = raw_name.strip_suffix("()") {
+            stripped.to_string()
+        } else if let Some(stripped) = raw_name.strip_suffix('(') {
+            self.expect_rparen()?;
+            stripped.to_string()
+        } else {
+            return Err(SandboxError::InvalidRequest(
+                "invalid function declaration".to_string(),
+            ));
+        };
+        if !is_valid_assignment_name(&name) {
             return Err(SandboxError::InvalidRequest(format!(
                 "invalid function name: {name}"
             )));
@@ -684,10 +744,7 @@ impl Parser {
             ));
         }
         self.expect_rbrace()?;
-        Ok(FunctionDef {
-            name: name.to_string(),
-            body_steps,
-        })
+        Ok(FunctionDef { name, body_steps })
     }
 
     fn parse_return_step(&mut self) -> Result<ReturnStep, SandboxError> {
@@ -864,6 +921,66 @@ impl Parser {
         Ok(steps)
     }
 
+    fn parse_steps_until_paren(&mut self) -> Result<Vec<ScriptStep>, SandboxError> {
+        let mut steps = Vec::new();
+
+        while self.skip_semicolons() {
+            if matches!(self.peek(), Some(Token::RParen)) {
+                break;
+            }
+            let op = if steps.is_empty() {
+                None
+            } else {
+                Some(ChainOp::Seq)
+            };
+            steps.push(ScriptStep {
+                op,
+                kind: self.parse_step_kind()?,
+            });
+
+            loop {
+                if matches!(self.peek(), Some(Token::RParen)) {
+                    return Ok(steps);
+                }
+                match self.peek() {
+                    Some(Token::Semicolon) => {
+                        self.index += 1;
+                        while matches!(self.peek(), Some(Token::Semicolon)) {
+                            self.index += 1;
+                        }
+                        if matches!(self.peek(), Some(Token::RParen)) {
+                            return Ok(steps);
+                        }
+                        break;
+                    }
+                    Some(Token::AndIf) => {
+                        self.index += 1;
+                        steps.push(ScriptStep {
+                            op: Some(ChainOp::AndIf),
+                            kind: self.parse_step_kind()?,
+                        });
+                    }
+                    Some(Token::OrIf) => {
+                        self.index += 1;
+                        steps.push(ScriptStep {
+                            op: Some(ChainOp::OrIf),
+                            kind: self.parse_step_kind()?,
+                        });
+                    }
+                    Some(Token::Pipe) => {
+                        return Err(SandboxError::InvalidRequest(
+                            "unexpected pipe in subshell body".to_string(),
+                        ));
+                    }
+                    Some(Token::RParen) | None => return Ok(steps),
+                    _ => break,
+                }
+            }
+        }
+
+        Ok(steps)
+    }
+
     fn parse_case_arm_steps(&mut self) -> Result<(Vec<ScriptStep>, bool), SandboxError> {
         let mut steps = Vec::new();
 
@@ -1003,11 +1120,33 @@ impl Parser {
         ))
     }
 
+    fn expect_rparen(&mut self) -> Result<(), SandboxError> {
+        if matches!(self.next(), Some(Token::RParen)) {
+            return Ok(());
+        }
+        Err(SandboxError::InvalidRequest(
+            "expected ) at the end of a subshell body".to_string(),
+        ))
+    }
+
     fn peek_function_definition(&self) -> bool {
-        matches!(
-            (self.peek(), self.tokens.get(self.index + 1)),
-            (Some(Token::Word(word)), Some(Token::LBrace)) if word.literal_value().ends_with("()")
-        )
+        match (
+            self.peek(),
+            self.tokens.get(self.index + 1),
+            self.tokens.get(self.index + 2),
+        ) {
+            (Some(Token::Word(word)), Some(Token::LBrace), _)
+                if word.literal_value().ends_with("()") =>
+            {
+                true
+            }
+            (Some(Token::Word(word)), Some(Token::RParen), Some(Token::LBrace))
+                if word.literal_value().ends_with('(') =>
+            {
+                true
+            }
+            _ => false,
+        }
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -1389,6 +1528,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_subshell_blocks() {
+        let parsed = parse_script("(echo hi; echo there) && echo done").unwrap();
+        let StepKind::Subshell(block) = &parsed[0].kind else {
+            panic!("expected subshell block");
+        };
+        assert_eq!(block.body_steps.len(), 2);
+    }
+
+    #[test]
     fn parses_case_and_control_flow_keywords() {
         let parsed = parse_script(
             "case $name in bert) echo yes ;; a*) echo no ;; *) echo later ;; esac; return 7; break 2; continue",
@@ -1458,6 +1606,7 @@ impl StepKind {
             Self::Pipeline(pipeline) => pipeline,
             Self::If(_) => panic!("expected pipeline"),
             Self::Case(_) => panic!("expected pipeline"),
+            Self::Subshell(_) => panic!("expected pipeline"),
             Self::While(_) => panic!("expected pipeline"),
             Self::Until(_) => panic!("expected pipeline"),
             Self::For(_) => panic!("expected pipeline"),
