@@ -58,8 +58,9 @@ use abash_core::{
     SandboxExtensions, SandboxFilesystem, SessionBackend, SessionState, TerminationReason,
 };
 use script::{
-    is_valid_assignment_name, parse_script, ChainOp, ForBlock, FunctionDef, IfBlock, Pipeline,
-    RedirectSpec, ScriptStep, ScriptWord, SimpleCommand, StepKind, WhileBlock,
+    is_valid_assignment_name, parse_script, CaseBlock, ChainOp, ControlStep, ForBlock, FunctionDef,
+    IfBlock, Pipeline, RedirectSpec, ReturnStep, ScriptStep, ScriptWord, SimpleCommand, StepKind,
+    WhileBlock,
 };
 use ureq::{http, Agent, RequestExt};
 use url::Url;
@@ -87,6 +88,9 @@ struct VirtualSession {
     history: Vec<String>,
     active_extensions: Option<Arc<dyn SandboxExtensions>>,
 }
+
+const CONTROL_FLOW_METADATA_KEY: &str = "__abash_control";
+const CONTROL_LEVELS_METADATA_KEY: &str = "__abash_levels";
 
 #[derive(Default)]
 struct LazyPathSnapshot {
@@ -346,7 +350,7 @@ impl VirtualSession {
         let mut script_stdin = Some(request.stdin);
         let mut state = ScriptState::default();
 
-        if let Err(mut failed) = self.run_steps(
+        if let Err(signal) = self.run_steps(
             runtime,
             &steps,
             config,
@@ -359,14 +363,7 @@ impl VirtualSession {
             &mut script_stdin,
             &mut state,
         ) {
-            let last_command = failed.metadata.get("command").cloned();
-            failed.metadata = decorate_script_metadata(
-                failed.metadata,
-                &runtime.cwd,
-                state.executed_steps,
-                last_command,
-            );
-            return Ok(failed);
+            return Ok(self.finalize_script_signal(signal, &runtime.cwd, state.executed_steps));
         }
 
         if let Some(mut result) = state.last_result {
@@ -401,7 +398,7 @@ impl VirtualSession {
         base_metadata: &BTreeMap<String, String>,
         script_stdin: &mut Option<Vec<u8>>,
         state: &mut ScriptState,
-    ) -> Result<(), ExecutionResult> {
+    ) -> Result<(), ScriptSignal> {
         for step in steps {
             if !should_run_step(step.op.as_ref(), state.last_result.as_ref()) {
                 continue;
@@ -427,22 +424,33 @@ impl VirtualSession {
                                 ExecutionResult::failure(error, self.base_metadata(&runtime.cwd));
                             failed.stdout = state.stdout.clone();
                             failed.stderr = state.stderr.clone();
-                            failed
+                            ScriptSignal::Failure(failed)
                         })?;
                     state.executed_steps += 1;
                     state.stdout.extend(&pipeline_result.stdout);
                     state.stderr.extend(&pipeline_result.stderr);
 
-                    if pipeline_result.error.is_some() {
-                        let mut failed = pipeline_result;
-                        failed.stdout = state.stdout.clone();
-                        failed.stderr = state.stderr.clone();
-                        return Err(failed);
+                    if let Some(mut signal) = self.signal_from_result(&pipeline_result) {
+                        signal.apply_state(state);
+                        return Err(signal);
                     }
 
                     state.last_result = Some(pipeline_result);
                 }
                 StepKind::If(block) => self.run_if_block(
+                    runtime,
+                    block,
+                    config,
+                    cancel_flag,
+                    timeout_ms,
+                    started,
+                    network_enabled,
+                    extensions,
+                    base_metadata,
+                    script_stdin,
+                    state,
+                )?,
+                StepKind::Case(block) => self.run_case_block(
                     runtime,
                     block,
                     config,
@@ -497,6 +505,54 @@ impl VirtualSession {
                 StepKind::FunctionDef(definition) => {
                     self.register_function(runtime, definition, base_metadata, state)
                 }
+                StepKind::Return(step) => {
+                    let result = self
+                        .run_return_step(runtime, step, base_metadata, state.last_result.as_ref())
+                        .map_err(|error| {
+                            let mut failed =
+                                ExecutionResult::failure(error, self.base_metadata(&runtime.cwd));
+                            failed.stdout = state.stdout.clone();
+                            failed.stderr = state.stderr.clone();
+                            ScriptSignal::Failure(failed)
+                        })?;
+                    state.executed_steps += 1;
+                    state.last_result = Some(result.clone());
+                    let mut signal = ScriptSignal::Return(result);
+                    signal.apply_state(state);
+                    return Err(signal);
+                }
+                StepKind::Break(step) => {
+                    let (levels, result) = self
+                        .run_control_step(runtime, "break", step, base_metadata)
+                        .map_err(|error| {
+                            let mut failed =
+                                ExecutionResult::failure(error, self.base_metadata(&runtime.cwd));
+                            failed.stdout = state.stdout.clone();
+                            failed.stderr = state.stderr.clone();
+                            ScriptSignal::Failure(failed)
+                        })?;
+                    state.executed_steps += 1;
+                    state.last_result = Some(result.clone());
+                    let mut signal = ScriptSignal::Break { levels, result };
+                    signal.apply_state(state);
+                    return Err(signal);
+                }
+                StepKind::Continue(step) => {
+                    let (levels, result) = self
+                        .run_control_step(runtime, "continue", step, base_metadata)
+                        .map_err(|error| {
+                            let mut failed =
+                                ExecutionResult::failure(error, self.base_metadata(&runtime.cwd));
+                            failed.stdout = state.stdout.clone();
+                            failed.stderr = state.stderr.clone();
+                            ScriptSignal::Failure(failed)
+                        })?;
+                    state.executed_steps += 1;
+                    state.last_result = Some(result.clone());
+                    let mut signal = ScriptSignal::Continue { levels, result };
+                    signal.apply_state(state);
+                    return Err(signal);
+                }
             }
         }
 
@@ -516,7 +572,7 @@ impl VirtualSession {
         base_metadata: &BTreeMap<String, String>,
         script_stdin: &mut Option<Vec<u8>>,
         state: &mut ScriptState,
-    ) -> Result<(), ExecutionResult> {
+    ) -> Result<(), ScriptSignal> {
         let condition = self
             .run_pipeline(
                 runtime,
@@ -534,17 +590,15 @@ impl VirtualSession {
                 let mut failed = ExecutionResult::failure(error, self.base_metadata(&runtime.cwd));
                 failed.stdout = state.stdout.clone();
                 failed.stderr = state.stderr.clone();
-                failed
+                ScriptSignal::Failure(failed)
             })?;
         state.executed_steps += 1;
         state.stdout.extend(&condition.stdout);
         state.stderr.extend(&condition.stderr);
 
-        if condition.error.is_some() {
-            let mut failed = condition;
-            failed.stdout = state.stdout.clone();
-            failed.stderr = state.stderr.clone();
-            return Err(failed);
+        if let Some(mut signal) = self.signal_from_result(&condition) {
+            signal.apply_state(state);
+            return Err(signal);
         }
 
         let branch_steps = if condition.exit_code == 0 {
@@ -559,7 +613,7 @@ impl VirtualSession {
         }
 
         let mut branch_state = ScriptState::default();
-        if let Err(mut failed) = self.run_steps(
+        if let Err(mut signal) = self.run_steps(
             runtime,
             branch_steps,
             config,
@@ -573,9 +627,8 @@ impl VirtualSession {
             &mut branch_state,
         ) {
             state.merge(branch_state);
-            failed.stdout = state.stdout.clone();
-            failed.stderr = state.stderr.clone();
-            return Err(failed);
+            signal.apply_state(state);
+            return Err(signal);
         }
 
         state.merge(branch_state);
@@ -583,6 +636,91 @@ impl VirtualSession {
             .last_result
             .clone()
             .or_else(|| Some(self.if_no_match_result(&runtime.cwd, base_metadata)));
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_case_block(
+        &mut self,
+        runtime: &mut RuntimeState,
+        block: &CaseBlock,
+        config: &SandboxConfig,
+        cancel_flag: &AtomicBool,
+        timeout_ms: Option<u64>,
+        started: Instant,
+        network_enabled: bool,
+        extensions: Option<&dyn SandboxExtensions>,
+        base_metadata: &BTreeMap<String, String>,
+        script_stdin: &mut Option<Vec<u8>>,
+        state: &mut ScriptState,
+    ) -> Result<(), ScriptSignal> {
+        let subject = block
+            .subject
+            .expand(&runtime.env, &runtime.positional_args)
+            .map_err(|error| {
+                let mut failed = ExecutionResult::failure(error, self.base_metadata(&runtime.cwd));
+                failed.stdout = state.stdout.clone();
+                failed.stderr = state.stderr.clone();
+                ScriptSignal::Failure(failed)
+            })?;
+
+        for arm in &block.arms {
+            let mut matched = false;
+            for pattern in &arm.patterns {
+                let expanded = pattern
+                    .expand(&runtime.env, &runtime.positional_args)
+                    .map_err(|error| {
+                        let mut failed =
+                            ExecutionResult::failure(error, self.base_metadata(&runtime.cwd));
+                        failed.stdout = state.stdout.clone();
+                        failed.stderr = state.stderr.clone();
+                        ScriptSignal::Failure(failed)
+                    })?;
+                if glob_matches_segment(&expanded, &subject) {
+                    matched = true;
+                    break;
+                }
+            }
+
+            if !matched {
+                continue;
+            }
+
+            if arm.steps.is_empty() {
+                state.last_result = Some(ExecutionResult::success(
+                    Vec::new(),
+                    self.command_metadata(&runtime.cwd, base_metadata.clone(), "case"),
+                ));
+                return Ok(());
+            }
+
+            let mut arm_state = ScriptState::default();
+            if let Err(mut signal) = self.run_steps(
+                runtime,
+                &arm.steps,
+                config,
+                cancel_flag,
+                timeout_ms,
+                started,
+                network_enabled,
+                extensions,
+                base_metadata,
+                script_stdin,
+                &mut arm_state,
+            ) {
+                state.merge(arm_state);
+                signal.apply_state(state);
+                return Err(signal);
+            }
+
+            state.merge(arm_state);
+            return Ok(());
+        }
+
+        state.last_result = Some(ExecutionResult::success(
+            Vec::new(),
+            self.command_metadata(&runtime.cwd, base_metadata.clone(), "case"),
+        ));
         Ok(())
     }
 
@@ -599,7 +737,7 @@ impl VirtualSession {
         base_metadata: &BTreeMap<String, String>,
         script_stdin: &mut Option<Vec<u8>>,
         state: &mut ScriptState,
-    ) -> Result<(), ExecutionResult> {
+    ) -> Result<(), ScriptSignal> {
         let mut ran_body = false;
 
         loop {
@@ -621,17 +759,15 @@ impl VirtualSession {
                         ExecutionResult::failure(error, self.base_metadata(&runtime.cwd));
                     failed.stdout = state.stdout.clone();
                     failed.stderr = state.stderr.clone();
-                    failed
+                    ScriptSignal::Failure(failed)
                 })?;
             state.executed_steps += 1;
             state.stdout.extend(&condition.stdout);
             state.stderr.extend(&condition.stderr);
 
-            if condition.error.is_some() {
-                let mut failed = condition;
-                failed.stdout = state.stdout.clone();
-                failed.stderr = state.stderr.clone();
-                return Err(failed);
+            if let Some(mut signal) = self.signal_from_result(&condition) {
+                signal.apply_state(state);
+                return Err(signal);
             }
 
             if condition.exit_code != 0 {
@@ -643,7 +779,8 @@ impl VirtualSession {
 
             ran_body = true;
             let mut body_state = ScriptState::default();
-            if let Err(mut failed) = self.run_steps(
+            runtime.loop_depth += 1;
+            let body_result = self.run_steps(
                 runtime,
                 &block.body_steps,
                 config,
@@ -655,11 +792,41 @@ impl VirtualSession {
                 base_metadata,
                 script_stdin,
                 &mut body_state,
-            ) {
+            );
+            runtime.loop_depth -= 1;
+            if let Err(signal) = body_result {
                 state.merge(body_state);
-                failed.stdout = state.stdout.clone();
-                failed.stderr = state.stderr.clone();
-                return Err(failed);
+                match signal {
+                    ScriptSignal::Break { levels, result } if levels <= 1 => {
+                        state.last_result = Some(result);
+                        return Ok(());
+                    }
+                    ScriptSignal::Break { levels, result } => {
+                        let mut next = ScriptSignal::Break {
+                            levels: levels - 1,
+                            result,
+                        };
+                        next.apply_state(state);
+                        return Err(next);
+                    }
+                    ScriptSignal::Continue { levels, result } if levels <= 1 => {
+                        state.last_result = Some(result);
+                        continue;
+                    }
+                    ScriptSignal::Continue { levels, result } => {
+                        let mut next = ScriptSignal::Continue {
+                            levels: levels - 1,
+                            result,
+                        };
+                        next.apply_state(state);
+                        return Err(next);
+                    }
+                    other => {
+                        let mut other = other;
+                        other.apply_state(state);
+                        return Err(other);
+                    }
+                }
             }
 
             state.merge(body_state);
@@ -679,7 +846,7 @@ impl VirtualSession {
         base_metadata: &BTreeMap<String, String>,
         script_stdin: &mut Option<Vec<u8>>,
         state: &mut ScriptState,
-    ) -> Result<(), ExecutionResult> {
+    ) -> Result<(), ScriptSignal> {
         let mut ran_body = false;
 
         loop {
@@ -701,17 +868,15 @@ impl VirtualSession {
                         ExecutionResult::failure(error, self.base_metadata(&runtime.cwd));
                     failed.stdout = state.stdout.clone();
                     failed.stderr = state.stderr.clone();
-                    failed
+                    ScriptSignal::Failure(failed)
                 })?;
             state.executed_steps += 1;
             state.stdout.extend(&condition.stdout);
             state.stderr.extend(&condition.stderr);
 
-            if condition.error.is_some() {
-                let mut failed = condition;
-                failed.stdout = state.stdout.clone();
-                failed.stderr = state.stderr.clone();
-                return Err(failed);
+            if let Some(mut signal) = self.signal_from_result(&condition) {
+                signal.apply_state(state);
+                return Err(signal);
             }
 
             if condition.exit_code == 0 {
@@ -723,7 +888,8 @@ impl VirtualSession {
 
             ran_body = true;
             let mut body_state = ScriptState::default();
-            if let Err(mut failed) = self.run_steps(
+            runtime.loop_depth += 1;
+            let body_result = self.run_steps(
                 runtime,
                 &block.body_steps,
                 config,
@@ -735,11 +901,41 @@ impl VirtualSession {
                 base_metadata,
                 script_stdin,
                 &mut body_state,
-            ) {
+            );
+            runtime.loop_depth -= 1;
+            if let Err(signal) = body_result {
                 state.merge(body_state);
-                failed.stdout = state.stdout.clone();
-                failed.stderr = state.stderr.clone();
-                return Err(failed);
+                match signal {
+                    ScriptSignal::Break { levels, result } if levels <= 1 => {
+                        state.last_result = Some(result);
+                        return Ok(());
+                    }
+                    ScriptSignal::Break { levels, result } => {
+                        let mut next = ScriptSignal::Break {
+                            levels: levels - 1,
+                            result,
+                        };
+                        next.apply_state(state);
+                        return Err(next);
+                    }
+                    ScriptSignal::Continue { levels, result } if levels <= 1 => {
+                        state.last_result = Some(result);
+                        continue;
+                    }
+                    ScriptSignal::Continue { levels, result } => {
+                        let mut next = ScriptSignal::Continue {
+                            levels: levels - 1,
+                            result,
+                        };
+                        next.apply_state(state);
+                        return Err(next);
+                    }
+                    other => {
+                        let mut other = other;
+                        other.apply_state(state);
+                        return Err(other);
+                    }
+                }
             }
 
             state.merge(body_state);
@@ -759,7 +955,7 @@ impl VirtualSession {
         base_metadata: &BTreeMap<String, String>,
         script_stdin: &mut Option<Vec<u8>>,
         state: &mut ScriptState,
-    ) -> Result<(), ExecutionResult> {
+    ) -> Result<(), ScriptSignal> {
         let items = if block.items.is_empty() {
             runtime.positional_args.clone()
         } else {
@@ -767,7 +963,7 @@ impl VirtualSession {
                 let mut failed = ExecutionResult::failure(error, self.base_metadata(&runtime.cwd));
                 failed.stdout = state.stdout.clone();
                 failed.stderr = state.stderr.clone();
-                failed
+                ScriptSignal::Failure(failed)
             })?
         };
 
@@ -779,7 +975,8 @@ impl VirtualSession {
         for item in items {
             runtime.env.insert(block.name.clone(), item);
             let mut body_state = ScriptState::default();
-            if let Err(mut failed) = self.run_steps(
+            runtime.loop_depth += 1;
+            let body_result = self.run_steps(
                 runtime,
                 &block.body_steps,
                 config,
@@ -791,11 +988,41 @@ impl VirtualSession {
                 base_metadata,
                 script_stdin,
                 &mut body_state,
-            ) {
+            );
+            runtime.loop_depth -= 1;
+            if let Err(signal) = body_result {
                 state.merge(body_state);
-                failed.stdout = state.stdout.clone();
-                failed.stderr = state.stderr.clone();
-                return Err(failed);
+                match signal {
+                    ScriptSignal::Break { levels, result } if levels <= 1 => {
+                        state.last_result = Some(result);
+                        return Ok(());
+                    }
+                    ScriptSignal::Break { levels, result } => {
+                        let mut next = ScriptSignal::Break {
+                            levels: levels - 1,
+                            result,
+                        };
+                        next.apply_state(state);
+                        return Err(next);
+                    }
+                    ScriptSignal::Continue { levels, result } if levels <= 1 => {
+                        state.last_result = Some(result);
+                        continue;
+                    }
+                    ScriptSignal::Continue { levels, result } => {
+                        let mut next = ScriptSignal::Continue {
+                            levels: levels - 1,
+                            result,
+                        };
+                        next.apply_state(state);
+                        return Err(next);
+                    }
+                    other => {
+                        let mut other = other;
+                        other.apply_state(state);
+                        return Err(other);
+                    }
+                }
             }
             state.merge(body_state);
         }
@@ -842,6 +1069,19 @@ impl VirtualSession {
                 expand_command_env(&command.assignments, &runtime.env, &runtime.positional_args)?;
             let expanded_argv =
                 expand_words(&command.argv, &command_env, &runtime.positional_args)?;
+            if expanded_argv.is_empty() {
+                if pipeline.commands.len() > 1 {
+                    return Err(SandboxError::InvalidRequest(
+                        "assignment-only commands cannot be used in pipelines".to_string(),
+                    ));
+                }
+                runtime.env = command_env;
+                last_result = Some(ExecutionResult::success(
+                    Vec::new(),
+                    self.command_metadata(&runtime.cwd, base_metadata.clone(), "assign"),
+                ));
+                continue;
+            }
             let expanded_argv = resolve_alias_words(&expanded_argv, &runtime.aliases)?;
             let command_name = expanded_argv.first().cloned().ok_or_else(|| {
                 SandboxError::InvalidRequest(
@@ -1241,6 +1481,66 @@ impl VirtualSession {
         )
     }
 
+    fn signal_from_result(&self, result: &ExecutionResult) -> Option<ScriptSignal> {
+        let control = result.metadata.get(CONTROL_FLOW_METADATA_KEY)?.clone();
+        let levels = result
+            .metadata
+            .get(CONTROL_LEVELS_METADATA_KEY)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(1);
+        let mut result = result.clone();
+        result.metadata.remove(CONTROL_FLOW_METADATA_KEY);
+        result.metadata.remove(CONTROL_LEVELS_METADATA_KEY);
+        match control.as_str() {
+            "break" => Some(ScriptSignal::Break { levels, result }),
+            "continue" => Some(ScriptSignal::Continue { levels, result }),
+            _ => None,
+        }
+    }
+
+    fn finalize_script_signal(
+        &self,
+        signal: ScriptSignal,
+        cwd: &str,
+        executed_steps: usize,
+    ) -> ExecutionResult {
+        match signal {
+            ScriptSignal::Failure(result) | ScriptSignal::Return(result) => {
+                self.finalize_script_result(result, cwd, executed_steps)
+            }
+            ScriptSignal::Break { result, .. } => self.finalize_script_result(
+                ExecutionResult::failure(
+                    SandboxError::InvalidRequest("break count exceeds loop nesting".to_string()),
+                    result.metadata,
+                ),
+                cwd,
+                executed_steps,
+            ),
+            ScriptSignal::Continue { result, .. } => self.finalize_script_result(
+                ExecutionResult::failure(
+                    SandboxError::InvalidRequest("continue count exceeds loop nesting".to_string()),
+                    result.metadata,
+                ),
+                cwd,
+                executed_steps,
+            ),
+        }
+    }
+
+    fn finalize_script_result(
+        &self,
+        mut result: ExecutionResult,
+        cwd: &str,
+        executed_steps: usize,
+    ) -> ExecutionResult {
+        result.metadata.remove(CONTROL_FLOW_METADATA_KEY);
+        result.metadata.remove(CONTROL_LEVELS_METADATA_KEY);
+        let last_command = result.metadata.get("command").cloned();
+        result.metadata =
+            decorate_script_metadata(result.metadata, cwd, executed_steps, last_command);
+        result
+    }
+
     fn push_history(&mut self, entry: String) {
         if !entry.is_empty() {
             self.history.push(entry);
@@ -1265,7 +1565,7 @@ impl VirtualSession {
         let mut state = ScriptState::default();
         let mut child = runtime.child();
 
-        if let Err(mut failed) = self.run_steps(
+        if let Err(signal) = self.run_steps(
             &mut child,
             &steps,
             config,
@@ -1278,14 +1578,7 @@ impl VirtualSession {
             &mut script_stdin,
             &mut state,
         ) {
-            let last_command = failed.metadata.get("command").cloned();
-            failed.metadata = decorate_script_metadata(
-                failed.metadata,
-                &child.cwd,
-                state.executed_steps,
-                last_command,
-            );
-            return Ok(failed);
+            return Ok(self.finalize_script_signal(signal, &child.cwd, state.executed_steps));
         }
 
         if let Some(mut result) = state.last_result {
@@ -1330,7 +1623,7 @@ impl VirtualSession {
         let mut script_stdin = Some(Vec::new());
         let mut state = ScriptState::default();
 
-        if let Err(mut failed) = self.run_steps(
+        if let Err(signal) = self.run_steps(
             &mut child,
             &body_steps,
             config,
@@ -1343,26 +1636,25 @@ impl VirtualSession {
             &mut script_stdin,
             &mut state,
         ) {
-            runtime.cwd = child.cwd;
-            runtime.persisted_cwd = child.persisted_cwd;
-            runtime.exported_env = child.exported_env;
-            runtime.aliases = child.aliases;
-            runtime.functions = child.functions;
-            let last_command = failed.metadata.get("command").cloned();
-            failed.metadata = decorate_script_metadata(
-                failed.metadata,
-                &runtime.cwd,
-                state.executed_steps,
-                last_command,
-            );
-            return Ok(failed);
+            self.sync_runtime_from_child(runtime, child);
+            return Ok(match signal {
+                ScriptSignal::Failure(result) | ScriptSignal::Return(result) => {
+                    self.finalize_script_result(result, &runtime.cwd, state.executed_steps)
+                }
+                ScriptSignal::Break { levels, result } => self.finalize_script_result(
+                    self.control_flow_result("break", levels, result),
+                    &runtime.cwd,
+                    state.executed_steps,
+                ),
+                ScriptSignal::Continue { levels, result } => self.finalize_script_result(
+                    self.control_flow_result("continue", levels, result),
+                    &runtime.cwd,
+                    state.executed_steps,
+                ),
+            });
         }
 
-        runtime.cwd = child.cwd;
-        runtime.persisted_cwd = child.persisted_cwd;
-        runtime.exported_env = child.exported_env;
-        runtime.aliases = child.aliases;
-        runtime.functions = child.functions;
+        self.sync_runtime_from_child(runtime, child);
 
         if let Some(mut result) = state.last_result {
             let last_command = result.metadata.get("command").cloned();
@@ -1381,6 +1673,14 @@ impl VirtualSession {
             Vec::new(),
             decorate_script_metadata(self.base_metadata(&runtime.cwd), &runtime.cwd, 0, None),
         ))
+    }
+
+    fn sync_runtime_from_child(&self, runtime: &mut RuntimeState, child: RuntimeState) {
+        runtime.cwd = child.cwd;
+        runtime.persisted_cwd = child.persisted_cwd;
+        runtime.exported_env = child.exported_env;
+        runtime.aliases = child.aliases;
+        runtime.functions = child.functions;
     }
 
     fn run_local(
@@ -1417,6 +1717,91 @@ impl VirtualSession {
             runtime.env.entry(arg).or_default();
         }
         Ok(ExecutionResult::success(Vec::new(), metadata))
+    }
+
+    fn run_return_step(
+        &self,
+        runtime: &RuntimeState,
+        step: &ReturnStep,
+        base_metadata: &BTreeMap<String, String>,
+        last_result: Option<&ExecutionResult>,
+    ) -> Result<ExecutionResult, SandboxError> {
+        if runtime.function_depth == 0 {
+            return Err(SandboxError::InvalidRequest(
+                "return may only be used inside a function".to_string(),
+            ));
+        }
+        let exit_code = match &step.status {
+            Some(status) => status
+                .expand(&runtime.env, &runtime.positional_args)?
+                .parse::<i32>()
+                .map_err(|_| {
+                    SandboxError::InvalidRequest("return status must be an integer".to_string())
+                })?,
+            None => last_result.map(|result| result.exit_code).unwrap_or(0),
+        };
+        Ok(ExecutionResult {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exit_code,
+            termination_reason: TerminationReason::Exited,
+            error: None,
+            metadata: self.command_metadata(&runtime.cwd, base_metadata.clone(), "return"),
+        })
+    }
+
+    fn run_control_step(
+        &self,
+        runtime: &RuntimeState,
+        keyword: &str,
+        step: &ControlStep,
+        base_metadata: &BTreeMap<String, String>,
+    ) -> Result<(usize, ExecutionResult), SandboxError> {
+        if runtime.loop_depth == 0 {
+            return Err(SandboxError::InvalidRequest(format!(
+                "{keyword} may only be used inside a loop"
+            )));
+        }
+        let levels = match &step.levels {
+            Some(levels) => levels
+                .expand(&runtime.env, &runtime.positional_args)?
+                .parse::<usize>()
+                .ok()
+                .filter(|levels| *levels > 0)
+                .ok_or_else(|| {
+                    SandboxError::InvalidRequest(format!(
+                        "{keyword} count must be a positive integer"
+                    ))
+                })?,
+            None => 1,
+        };
+        if levels > runtime.loop_depth {
+            return Err(SandboxError::InvalidRequest(format!(
+                "{keyword} count exceeds loop nesting"
+            )));
+        }
+        Ok((
+            levels,
+            ExecutionResult::success(
+                Vec::new(),
+                self.command_metadata(&runtime.cwd, base_metadata.clone(), keyword),
+            ),
+        ))
+    }
+
+    fn control_flow_result(
+        &self,
+        keyword: &str,
+        levels: usize,
+        mut result: ExecutionResult,
+    ) -> ExecutionResult {
+        result
+            .metadata
+            .insert(CONTROL_FLOW_METADATA_KEY.to_string(), keyword.to_string());
+        result
+            .metadata
+            .insert(CONTROL_LEVELS_METADATA_KEY.to_string(), levels.to_string());
+        result
     }
 
     fn apply_redirects(
@@ -3985,6 +4370,19 @@ struct ScriptState {
     executed_steps: usize,
 }
 
+enum ScriptSignal {
+    Failure(ExecutionResult),
+    Return(ExecutionResult),
+    Break {
+        levels: usize,
+        result: ExecutionResult,
+    },
+    Continue {
+        levels: usize,
+        result: ExecutionResult,
+    },
+}
+
 fn parent_directory_chain(path: &str) -> Vec<String> {
     let mut current = path.to_string();
     let mut parents = Vec::new();
@@ -4007,6 +4405,7 @@ struct RuntimeState {
     aliases: BTreeMap<String, Vec<String>>,
     positional_args: Vec<String>,
     functions: BTreeMap<String, Vec<ScriptStep>>,
+    loop_depth: usize,
     function_depth: usize,
 }
 
@@ -4035,6 +4434,7 @@ impl RuntimeState {
             aliases,
             positional_args,
             functions: BTreeMap::new(),
+            loop_depth: 0,
             function_depth: 0,
         }
     }
@@ -4050,6 +4450,20 @@ impl ScriptState {
         self.stderr.extend(other.stderr);
         self.executed_steps += other.executed_steps;
         self.last_result = other.last_result;
+    }
+}
+
+impl ScriptSignal {
+    fn apply_state(&mut self, state: &ScriptState) {
+        match self {
+            Self::Failure(result)
+            | Self::Return(result)
+            | Self::Break { result, .. }
+            | Self::Continue { result, .. } => {
+                result.stdout = state.stdout.clone();
+                result.stderr = state.stderr.clone();
+            }
+        }
     }
 }
 

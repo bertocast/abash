@@ -41,10 +41,14 @@ pub(crate) struct ScriptStep {
 pub(crate) enum StepKind {
     Pipeline(Pipeline),
     If(IfBlock),
+    Case(CaseBlock),
     While(WhileBlock),
     Until(WhileBlock),
     For(ForBlock),
     FunctionDef(FunctionDef),
+    Return(ReturnStep),
+    Break(ControlStep),
+    Continue(ControlStep),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,6 +56,18 @@ pub(crate) struct IfBlock {
     pub condition: Pipeline,
     pub then_steps: Vec<ScriptStep>,
     pub else_steps: Vec<ScriptStep>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CaseBlock {
+    pub subject: ScriptWord,
+    pub arms: Vec<CaseArm>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CaseArm {
+    pub patterns: Vec<ScriptWord>,
+    pub steps: Vec<ScriptStep>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,6 +90,16 @@ pub(crate) struct FunctionDef {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReturnStep {
+    pub status: Option<ScriptWord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ControlStep {
+    pub levels: Option<ScriptWord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ScriptWord {
     parts: Vec<WordPart>,
 }
@@ -92,6 +118,9 @@ pub(crate) enum Token {
     AndIf,
     OrIf,
     Semicolon,
+    DoubleSemicolon,
+    LParen,
+    RParen,
     LBrace,
     RBrace,
     RedirectIn,
@@ -293,7 +322,19 @@ fn tokenize(source: &str) -> Result<Vec<Token>, SandboxError> {
             }
             ';' => {
                 builder.flush(&mut tokens);
-                tokens.push(Token::Semicolon);
+                if chars.next_if_eq(&';').is_some() {
+                    tokens.push(Token::DoubleSemicolon);
+                } else {
+                    tokens.push(Token::Semicolon);
+                }
+            }
+            '(' if builder.is_empty() => {
+                builder.flush(&mut tokens);
+                tokens.push(Token::LParen);
+            }
+            ')' if builder.is_empty() => {
+                builder.flush(&mut tokens);
+                tokens.push(Token::RParen);
             }
             '{' if builder.is_empty() => {
                 builder.flush(&mut tokens);
@@ -441,6 +482,9 @@ impl Parser {
         if self.consume_keyword("if") {
             return Ok(StepKind::If(self.parse_if_block()?));
         }
+        if self.consume_keyword("case") {
+            return Ok(StepKind::Case(self.parse_case_block()?));
+        }
         if self.consume_keyword("while") {
             return Ok(StepKind::While(self.parse_while_block()?));
         }
@@ -449,6 +493,15 @@ impl Parser {
         }
         if self.consume_keyword("for") {
             return Ok(StepKind::For(self.parse_for_block()?));
+        }
+        if self.consume_keyword("return") {
+            return Ok(StepKind::Return(self.parse_return_step()?));
+        }
+        if self.consume_keyword("break") {
+            return Ok(StepKind::Break(self.parse_control_step("break")?));
+        }
+        if self.consume_keyword("continue") {
+            return Ok(StepKind::Continue(self.parse_control_step("continue")?));
         }
         Ok(StepKind::Pipeline(self.parse_pipeline()?))
     }
@@ -492,6 +545,54 @@ impl Parser {
             commands.push(self.parse_command()?);
         }
         Ok(Pipeline { commands })
+    }
+
+    fn parse_case_block(&mut self) -> Result<CaseBlock, SandboxError> {
+        let subject = self.expect_word("case subject")?;
+        self.expect_keyword("in")?;
+        let mut arms = Vec::new();
+
+        loop {
+            self.skip_semicolons();
+            if self.consume_keyword("esac") {
+                break;
+            }
+            if matches!(self.peek(), Some(Token::LParen)) {
+                self.index += 1;
+            }
+
+            let (first_pattern, mut closed) =
+                split_case_pattern_word(self.expect_word("case pattern")?);
+            let mut patterns = vec![first_pattern];
+            while !closed && matches!(self.peek(), Some(Token::Pipe)) {
+                self.index += 1;
+                let (pattern, pattern_closed) =
+                    split_case_pattern_word(self.expect_word("case pattern")?);
+                patterns.push(pattern);
+                closed = pattern_closed;
+            }
+
+            if !closed && !matches!(self.next(), Some(Token::RParen)) {
+                return Err(SandboxError::InvalidRequest(
+                    "expected ) after case pattern".to_string(),
+                ));
+            }
+
+            let (steps, terminated) = self.parse_case_arm_steps()?;
+            arms.push(CaseArm { patterns, steps });
+            if !terminated {
+                self.expect_keyword("esac")?;
+                break;
+            }
+        }
+
+        if arms.is_empty() {
+            return Err(SandboxError::InvalidRequest(
+                "case blocks require at least one pattern arm".to_string(),
+            ));
+        }
+
+        Ok(CaseBlock { subject, arms })
     }
 
     fn parse_while_block(&mut self) -> Result<WhileBlock, SandboxError> {
@@ -589,6 +690,18 @@ impl Parser {
         })
     }
 
+    fn parse_return_step(&mut self) -> Result<ReturnStep, SandboxError> {
+        Ok(ReturnStep {
+            status: self.parse_optional_control_word("return", "status")?,
+        })
+    }
+
+    fn parse_control_step(&mut self, keyword: &str) -> Result<ControlStep, SandboxError> {
+        Ok(ControlStep {
+            levels: self.parse_optional_control_word(keyword, "count")?,
+        })
+    }
+
     fn parse_command(&mut self) -> Result<SimpleCommand, SandboxError> {
         let mut assignments = Vec::new();
         let mut argv = Vec::new();
@@ -644,9 +757,15 @@ impl Parser {
             }
         }
 
-        if argv.is_empty() {
+        if argv.is_empty() && assignments.is_empty() {
             return Err(SandboxError::InvalidRequest(
                 "script command must include at least one command word".to_string(),
+            ));
+        }
+
+        if argv.is_empty() && !redirects.is_empty() {
+            return Err(SandboxError::InvalidRequest(
+                "assignment-only script commands do not support redirects".to_string(),
             ));
         }
 
@@ -743,6 +862,103 @@ impl Parser {
         }
 
         Ok(steps)
+    }
+
+    fn parse_case_arm_steps(&mut self) -> Result<(Vec<ScriptStep>, bool), SandboxError> {
+        let mut steps = Vec::new();
+
+        while self.skip_semicolons() {
+            if matches!(self.peek(), Some(Token::DoubleSemicolon)) {
+                self.index += 1;
+                return Ok((steps, true));
+            }
+            if self.peek_keyword(&["esac"]) {
+                return Ok((steps, false));
+            }
+
+            let op = if steps.is_empty() {
+                None
+            } else {
+                Some(ChainOp::Seq)
+            };
+            steps.push(ScriptStep {
+                op,
+                kind: self.parse_step_kind()?,
+            });
+
+            loop {
+                if matches!(self.peek(), Some(Token::DoubleSemicolon)) {
+                    self.index += 1;
+                    return Ok((steps, true));
+                }
+                if self.peek_keyword(&["esac"]) {
+                    return Ok((steps, false));
+                }
+                match self.peek() {
+                    Some(Token::Semicolon) => {
+                        self.index += 1;
+                        while matches!(self.peek(), Some(Token::Semicolon)) {
+                            self.index += 1;
+                        }
+                        if matches!(self.peek(), Some(Token::DoubleSemicolon)) {
+                            self.index += 1;
+                            return Ok((steps, true));
+                        }
+                        if self.peek_keyword(&["esac"]) {
+                            return Ok((steps, false));
+                        }
+                        break;
+                    }
+                    Some(Token::AndIf) => {
+                        self.index += 1;
+                        steps.push(ScriptStep {
+                            op: Some(ChainOp::AndIf),
+                            kind: self.parse_step_kind()?,
+                        });
+                    }
+                    Some(Token::OrIf) => {
+                        self.index += 1;
+                        steps.push(ScriptStep {
+                            op: Some(ChainOp::OrIf),
+                            kind: self.parse_step_kind()?,
+                        });
+                    }
+                    Some(Token::Pipe) => {
+                        return Err(SandboxError::InvalidRequest(
+                            "unexpected pipe in case arm".to_string(),
+                        ));
+                    }
+                    Some(Token::DoubleSemicolon) => {
+                        self.index += 1;
+                        return Ok((steps, true));
+                    }
+                    Some(Token::RBrace) | None => return Ok((steps, false)),
+                    _ => break,
+                }
+            }
+        }
+
+        Ok((steps, false))
+    }
+
+    fn parse_optional_control_word(
+        &mut self,
+        keyword: &str,
+        noun: &str,
+    ) -> Result<Option<ScriptWord>, SandboxError> {
+        let value = if matches!(self.peek(), Some(Token::Word(_))) {
+            Some(self.expect_word(keyword)?)
+        } else {
+            None
+        };
+
+        if matches!(self.peek(), Some(Token::Word(_))) {
+            return Err(SandboxError::InvalidRequest(format!(
+                "{keyword} accepts at most one {noun}"
+            )));
+        }
+
+        Ok(value)
     }
 
     fn peek_keyword(&self, keywords: &[&str]) -> bool {
@@ -947,6 +1163,21 @@ fn expand_part(
     }
 
     Ok(output)
+}
+
+fn split_case_pattern_word(mut word: ScriptWord) -> (ScriptWord, bool) {
+    let Some(last_part) = word.parts.last_mut() else {
+        return (word, false);
+    };
+    if !last_part.text.ends_with(')') {
+        return (word, false);
+    }
+
+    last_part.text.pop();
+    if last_part.text.is_empty() && word.parts.len() > 1 {
+        word.parts.pop();
+    }
+    (word, true)
 }
 
 #[cfg(test)]
@@ -1156,6 +1387,68 @@ mod tests {
         assert_eq!(function.name, "greet");
         assert_eq!(function.body_steps.len(), 1);
     }
+
+    #[test]
+    fn parses_case_and_control_flow_keywords() {
+        let parsed = parse_script(
+            "case $name in bert) echo yes ;; a*) echo no ;; *) echo later ;; esac; return 7; break 2; continue",
+        )
+        .unwrap();
+
+        let StepKind::Case(case_block) = &parsed[0].kind else {
+            panic!("expected case block");
+        };
+        assert_eq!(case_block.arms.len(), 3);
+        assert_eq!(case_block.arms[0].patterns[0].literal(), "bert");
+        assert_eq!(case_block.arms[1].patterns[0].literal(), "a*");
+        assert_eq!(case_block.arms[2].patterns[0].literal(), "*");
+        assert_eq!(case_block.arms[0].steps.len(), 1);
+        assert_eq!(case_block.arms[1].steps.len(), 1);
+        assert_eq!(case_block.arms[2].steps.len(), 1);
+
+        let StepKind::Return(return_step) = &parsed[1].kind else {
+            panic!("expected return step");
+        };
+        assert_eq!(
+            return_step
+                .status
+                .as_ref()
+                .expect("return status")
+                .literal(),
+            "7"
+        );
+
+        let StepKind::Break(control_step) = &parsed[2].kind else {
+            panic!("expected break step");
+        };
+        assert_eq!(
+            control_step
+                .levels
+                .as_ref()
+                .expect("break levels")
+                .literal(),
+            "2"
+        );
+
+        let StepKind::Continue(control_step) = &parsed[3].kind else {
+            panic!("expected continue step");
+        };
+        assert!(control_step.levels.is_none());
+    }
+
+    #[test]
+    fn parses_case_after_assignment_prefix() {
+        let parsed = parse_script(
+            "name=bert; case $name in bert) echo exact ;; a*) echo prefix ;; *) echo none ;; esac",
+        )
+        .unwrap();
+
+        assert_eq!(parsed.len(), 2);
+        let StepKind::Case(case_block) = &parsed[1].kind else {
+            panic!("expected case block");
+        };
+        assert_eq!(case_block.arms.len(), 3);
+    }
 }
 
 impl StepKind {
@@ -1164,10 +1457,14 @@ impl StepKind {
         match self {
             Self::Pipeline(pipeline) => pipeline,
             Self::If(_) => panic!("expected pipeline"),
+            Self::Case(_) => panic!("expected pipeline"),
             Self::While(_) => panic!("expected pipeline"),
             Self::Until(_) => panic!("expected pipeline"),
             Self::For(_) => panic!("expected pipeline"),
             Self::FunctionDef(_) => panic!("expected pipeline"),
+            Self::Return(_) => panic!("expected pipeline"),
+            Self::Break(_) => panic!("expected pipeline"),
+            Self::Continue(_) => panic!("expected pipeline"),
         }
     }
 }

@@ -40,10 +40,10 @@ Command-name parity with `just-bash` is done. The remaining work is mostly behav
 
 ### Tier 3: Shell And Builtins
 
-- [ ] add `case`
-- [ ] add `return` inside script functions
-- [ ] add `break`
-- [ ] add `continue`
+- [x] add `case`
+- [x] add `return` inside script functions
+- [x] add `break`
+- [x] add `continue`
 - [ ] evaluate command substitution
 - [ ] evaluate subshell execution
 - [ ] deepen `awk`, `jq`, `yq`, `xan`, `curl`, `sqlite3`, `tar`, `python3`, `js-exec` where narrow behavior still blocks real workflows

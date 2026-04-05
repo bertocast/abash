@@ -31,8 +31,9 @@
 - pipes (`|`): supported, buffered and sequential
 - redirects (`<`, `>`, `>>`, `2>`, `2>>`, `2>&1`): supported
 - command chaining (`;`, `&&`, `||`): supported
-- minimal control flow (`if ...; then ...; fi`, `elif`, optional `else`, `while ...; do ...; done`, `until ...; do ...; done`, `for ...; do ...; done`): supported
-- narrow `name() { ...; }` functions plus `local`: supported
+- minimal control flow (`if ...; then ...; fi`, `elif`, optional `else`, `case ... in ... esac`, `while ...; do ...; done`, `until ...; do ...; done`, `for ...; do ...; done`): supported
+- narrow `name() { ...; }` functions plus `local`, `return`, `break`, and `continue`: supported
+- script-scoped assignment statements (`NAME=value; echo $NAME`): supported
 - command-local assignment prefixes (`FOO=bar cmd`): supported
 - `$NAME`, `${NAME}`, `${NAME:-default}`, `$1`, `$2`, `$@`, and `$#` expansion: supported in script mode
 - argument globbing with `*`, `?`, and bracket classes: supported in script mode
@@ -103,10 +104,10 @@
 - narrow integer `seq` with 1, 2, or 3 arguments: supported
 - narrow `date` with default local timestamp output plus limited `+FORMAT`: supported
 - unmatched glob patterns: preserved literally
-- persistent shell variables: not implemented
+- shell variables do not persist across separate exec calls: by design
 - command-name globbing: not implemented
-- `case`: not implemented
-- `return` / `break` / `continue`: not implemented
+- command substitution: not implemented
+- subshell execution: not implemented
 - subshells / command substitution: not implemented
 - broader fd juggling beyond `2>`, `2>>`, `2>&1`: not implemented
 

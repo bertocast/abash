@@ -281,6 +281,73 @@ async def test_script_mode_supports_functions_and_local_variables() -> None:
 
 
 @pytest.mark.anyio
+async def test_script_mode_supports_script_scoped_assignments() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script("name=bert; echo $name")
+
+    assert result.exit_code == 0
+    assert result.stdout == "bert\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_supports_case_matching() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script(
+            "name=bert; case $name in bert) echo exact ;; a*) echo prefix ;; *) echo none ;; esac"
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "exact\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_supports_return_inside_functions() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script(
+            "greet() { echo start; return 7; echo never; }; greet || echo fallback"
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "start\nfallback\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_rejects_return_outside_functions() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script("return 2")
+
+    assert result.exit_code == 1
+    assert result.error is not None
+    assert result.error.kind is ErrorKind.INVALID_REQUEST
+
+
+@pytest.mark.anyio
+async def test_script_mode_supports_break_and_continue() -> None:
+    async with Bash() as bash:
+        broken = await bash.exec_script(
+            "for item in a b c; do echo $item; break; done; echo after"
+        )
+        continued = await bash.exec_script(
+            "for item in a b; do echo $item; continue; echo never; done"
+        )
+
+    assert broken.exit_code == 0
+    assert broken.stdout == "a\nafter\n"
+    assert continued.exit_code == 0
+    assert continued.stdout == "a\nb\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_rejects_break_outside_loops() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script("break")
+
+    assert result.exit_code == 1
+    assert result.error is not None
+    assert result.error.kind is ErrorKind.INVALID_REQUEST
+
+
+@pytest.mark.anyio
 async def test_argv_mode_text_builtins_support_stdin_and_exit_codes() -> None:
     async with Bash() as bash:
         grep_hit = await bash.exec(["grep", "beta"], stdin="alpha\nbeta\n")
