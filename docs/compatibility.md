@@ -60,7 +60,7 @@
 - default session-persistent `cd`, `export`, aliases, and history, with opt-in `per_exec` reset mode: supported
 - narrow `alias` / `unalias`: supported
 - narrow `bash` / `sh` with `-c <script>` or one script path: supported, child-shell state stays isolated
-- narrow `curl` with policy-gated `-X`, `-d`, `-I`, `-i`, `-o`, and `-L`: supported
+- narrow `curl` with policy-gated `-X`, `-d`, `--data-binary`, `-H`, `-I`, `-i`, `-o`, `-L`, `-s`, and `-f`: supported
 - narrow `html-to-markdown` with file-or-stdin input plus `--bullet`, `--code`, `--hr`, and `--heading-style`: supported
 - narrow `tree` with optional `-a` and `-L`: supported
 - narrow `stat` for type, mode bits, and file-size-or-entry-count metadata: supported
@@ -70,15 +70,15 @@
 - narrow `ln` with hard links by default plus `-s`, optional `-f`, `-n`, and `-v`: supported
 - narrow `jq` with paths, pipes, commas, literals, array/object construction, `select`, `map`, `length`, `type`, `keys`, `has`, `//`, comparisons, basic arithmetic, direct path assignment, plus `-r` / `-c` / `-e` / `-s` / `-n`: supported
 - narrow `yq` with YAML default input/output, optional JSON/TOML/CSV/INI/XML transcoding, file-extension auto-detect for `.json`/`.toml`/`.csv`/`.tsv`/`.ini`/`.xml`, `--front-matter`, multi-file `-i` rewrites that preserve source format by default, and the current jq-lite filter surface: supported
-- narrow `sqlite3` with `:memory:` or file-backed databases, SQL from arg or stdin, and `-json` / `-csv` / `-header`: supported
+- narrow `sqlite3` with `:memory:` or file-backed databases, SQL from arg or stdin, narrow `.tables` / `.schema`, and `-json` / `-csv` / `-header`: supported
 - narrow `gzip` with stdin/stdout plus `-c` / `-d` / `-k` / `-f` / `-S`: supported
 - narrow `gunzip` as `gzip -d`: supported
 - narrow `zcat` as `gzip -d -c`: supported
-- narrow `tar` with `-c` / `-x` / `-t`, optional `-f`, `-C`, `-O`, and `-z`, plus safe extraction: supported
+- narrow `tar` with `-c` / `-x` / `-t`, optional `-f`, `-C`, `-O`, `-z`, `--exclude`, and `--strip-components`, plus safe extraction: supported
 - narrow `chmod` with numeric or symbolic modes plus optional `-R` and `-v`: supported
 - `python` alias to `python3`: supported
-- narrow host-backed `python3` with `-c`, `-m`, script-file, `stdin`, and workspace file sync: supported
-- narrow host-backed `js-exec` with `-c`, script-file, `stdin`, and workspace file sync: supported
+- narrow host-backed `python3` with `-c`, `-m`, script-file, `-` stdin-script mode, plain stdin execution, and workspace file sync: supported
+- narrow host-backed `js-exec` with `-c`, script-file, `--` separator, `-` stdin-script mode, plain stdin execution, and workspace file sync: supported
 - narrow `xan` CSV toolkit with `headers`, `count`, `head`, `tail`, `slice`, `reverse`, `behead`, `cat`, `select`, `drop`, `rename`, `enum`, `search`, `sort`, `dedup`, `top`, `frequency`, `stats`, `agg`, `groupby`, and `filter`: supported
 - `egrep` alias to current regex `grep`: supported
 - `fgrep` alias to current fixed-string `grep`: supported

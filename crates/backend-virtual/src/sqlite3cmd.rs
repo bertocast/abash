@@ -158,8 +158,12 @@ pub(crate) fn execute(
         DatabaseKind::File(create_temp_db_path()?)
     };
     let connection = open_connection(&db_kind, plan.readonly, existing_db)?;
-    let mut statements = Vec::new();
-    let execution = run_sql(&connection, &plan.sql, &mut statements)?;
+    let execution = if let Some(command) = parse_meta_command(&plan.sql) {
+        run_meta_command(&connection, command)?
+    } else {
+        let mut statements = Vec::new();
+        run_sql(&connection, &plan.sql, &mut statements)?
+    };
     let writeback = if plan.database == ":memory:" || plan.readonly {
         None
     } else {
@@ -233,6 +237,11 @@ enum SqlExecution {
     Message(String),
 }
 
+enum MetaCommand<'a> {
+    Tables,
+    Schema(Option<&'a str>),
+}
+
 fn help_text() -> String {
     [
         "sqlite3 [OPTIONS] DATABASE [SQL]",
@@ -280,6 +289,31 @@ fn open_connection(
     }
 }
 
+fn parse_meta_command(sql: &str) -> Option<MetaCommand<'_>> {
+    let trimmed = sql.trim();
+    if trimmed == ".tables" {
+        return Some(MetaCommand::Tables);
+    }
+    if let Some(rest) = trimmed.strip_prefix(".schema") {
+        let name = rest.trim();
+        if name.is_empty() {
+            return Some(MetaCommand::Schema(None));
+        }
+        return Some(MetaCommand::Schema(Some(name)));
+    }
+    None
+}
+
+fn run_meta_command(
+    connection: &Connection,
+    command: MetaCommand<'_>,
+) -> Result<SqlExecution, SandboxError> {
+    match command {
+        MetaCommand::Tables => run_tables_command(connection),
+        MetaCommand::Schema(name) => run_schema_command(connection, name),
+    }
+}
+
 fn create_temp_db_path() -> Result<PathBuf, SandboxError> {
     let mut path = std::env::temp_dir();
     let stamp = SystemTime::now()
@@ -288,6 +322,73 @@ fn create_temp_db_path() -> Result<PathBuf, SandboxError> {
         .as_nanos();
     path.push(format!("abash-sqlite-{}-{stamp}.db", std::process::id()));
     Ok(path)
+}
+
+fn run_tables_command(connection: &Connection) -> Result<SqlExecution, SandboxError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT name
+             FROM sqlite_master
+             WHERE type IN ('table', 'view')
+               AND name NOT LIKE 'sqlite_%'
+             ORDER BY name",
+        )
+        .map_err(to_backend_error)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(to_backend_error)?;
+
+    let mut table_rows = Vec::new();
+    for row in rows {
+        table_rows.push(vec![CellValue::Text(row.map_err(to_backend_error)?)]);
+    }
+
+    Ok(SqlExecution::Rows(vec![ResultSet {
+        columns: vec!["name".to_string()],
+        rows: table_rows,
+    }]))
+}
+
+fn run_schema_command(
+    connection: &Connection,
+    name: Option<&str>,
+) -> Result<SqlExecution, SandboxError> {
+    let sql = if name.is_some() {
+        "SELECT sql
+         FROM sqlite_master
+         WHERE sql IS NOT NULL
+           AND name NOT LIKE 'sqlite_%'
+           AND (name = ?1 OR tbl_name = ?1)
+         ORDER BY type, name"
+    } else {
+        "SELECT sql
+         FROM sqlite_master
+         WHERE sql IS NOT NULL
+           AND name NOT LIKE 'sqlite_%'
+         ORDER BY type, name"
+    };
+    let mut statement = connection.prepare(sql).map_err(to_backend_error)?;
+    let mapped = if let Some(name) = name {
+        statement
+            .query_map([name], |row| row.get::<_, String>(0))
+            .map_err(to_backend_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(to_backend_error)?
+    } else {
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(to_backend_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(to_backend_error)?
+    };
+
+    Ok(SqlExecution::Rows(vec![ResultSet {
+        columns: vec!["sql".to_string()],
+        rows: mapped
+            .into_iter()
+            .map(|value| vec![CellValue::Text(format!("{value};"))])
+            .collect(),
+    }]))
 }
 
 fn run_sql(

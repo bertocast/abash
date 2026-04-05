@@ -2572,6 +2572,18 @@ impl VirtualSession {
             let addrs = resolve_remote_addrs(&current_url)?;
             policy.ensure_remote_addrs(&addrs)?;
 
+            for (name, _) in &spec.headers {
+                if origin
+                    .injected_headers
+                    .iter()
+                    .any(|(injected_name, _)| injected_name.eq_ignore_ascii_case(name))
+                {
+                    return Err(SandboxError::InvalidRequest(format!(
+                        "curl cannot override sandbox-injected header: {name}"
+                    )));
+                }
+            }
+
             let mut request = http::Request::builder()
                 .method(
                     http::Method::from_bytes(method.as_bytes()).map_err(|error| {
@@ -2580,6 +2592,9 @@ impl VirtualSession {
                 )
                 .uri(current_url.as_str());
             for (name, value) in &origin.injected_headers {
+                request = request.header(name, value);
+            }
+            for (name, value) in &spec.headers {
                 request = request.header(name, value);
             }
 
@@ -2670,6 +2685,22 @@ impl VirtualSession {
             metadata.insert("http_method".to_string(), method.clone());
             if let Some(content_type) = content_type {
                 metadata.insert("http_content_type".to_string(), content_type);
+            }
+
+            if spec.fail_on_http_error && status >= 400 {
+                let stderr = if spec.silent {
+                    Vec::new()
+                } else {
+                    format!("curl: (22) The requested URL returned error: {status}\n").into_bytes()
+                };
+                return Ok(ExecutionResult {
+                    stdout: Vec::new(),
+                    stderr,
+                    exit_code: 22,
+                    termination_reason: TerminationReason::Exited,
+                    error: None,
+                    metadata,
+                });
             }
 
             if let Some(path) = &spec.output_path {

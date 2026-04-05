@@ -2,6 +2,7 @@ use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 
 use abash_core::{resolve_sandbox_path, SandboxError, SandboxFilesystem};
+use regex::Regex;
 use tar::{Archive, Builder, EntryType, Header};
 
 use crate::{cp, gzipcmd};
@@ -16,9 +17,11 @@ pub(crate) struct Spec {
     pub(crate) mode: Mode,
     pub(crate) archive_path: Option<String>,
     pub(crate) member_paths: Vec<String>,
+    pub(crate) exclude_patterns: Vec<String>,
     pub(crate) directory: Option<String>,
     pub(crate) gzip: bool,
     pub(crate) to_stdout: bool,
+    pub(crate) strip_components: usize,
 }
 
 pub(crate) fn parse(cwd: &str, args: &[String]) -> Result<Spec, SandboxError> {
@@ -26,9 +29,11 @@ pub(crate) fn parse(cwd: &str, args: &[String]) -> Result<Spec, SandboxError> {
     let mut extract = false;
     let mut list = false;
     let mut archive_path = None;
+    let mut exclude_patterns = Vec::new();
     let mut directory = None;
     let mut gzip = false;
     let mut to_stdout = false;
+    let mut strip_components = 0usize;
     let mut index = 0usize;
 
     while let Some(arg) = args.get(index) {
@@ -48,6 +53,16 @@ pub(crate) fn parse(cwd: &str, args: &[String]) -> Result<Spec, SandboxError> {
         }
         if let Some(value) = arg.strip_prefix("--directory=") {
             directory = Some(resolve_sandbox_path(cwd, value)?);
+            index += 1;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--exclude=") {
+            exclude_patterns.push(value.to_string());
+            index += 1;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--strip-components=") {
+            strip_components = parse_strip_components(value)?;
             index += 1;
             continue;
         }
@@ -77,6 +92,26 @@ pub(crate) fn parse(cwd: &str, args: &[String]) -> Result<Spec, SandboxError> {
                     ));
                 };
                 directory = Some(resolve_sandbox_path(cwd, value)?);
+                index += 2;
+                continue;
+            }
+            "--exclude" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(SandboxError::InvalidRequest(
+                        "tar --exclude requires a pattern".to_string(),
+                    ));
+                };
+                exclude_patterns.push(value.clone());
+                index += 2;
+                continue;
+            }
+            "--strip-components" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(SandboxError::InvalidRequest(
+                        "tar --strip-components requires a non-negative integer".to_string(),
+                    ));
+                };
+                strip_components = parse_strip_components(value)?;
                 index += 2;
                 continue;
             }
@@ -159,9 +194,11 @@ pub(crate) fn parse(cwd: &str, args: &[String]) -> Result<Spec, SandboxError> {
         mode,
         archive_path,
         member_paths: args[index..].to_vec(),
+        exclude_patterns,
         directory,
         gzip,
         to_stdout,
+        strip_components,
     })
 }
 
@@ -196,12 +233,17 @@ fn create_archive(
 
     for original in &spec.member_paths {
         let resolved = resolve_sandbox_path(base_cwd, original)?;
+        let archive_member = archive_name(original);
+        if matches_exclude(&archive_member, &spec.exclude_patterns)? {
+            continue;
+        }
         append_member(
             filesystem,
             &mut archive,
             &listed_paths,
             &resolved,
-            &archive_name(original),
+            &archive_member,
+            &spec.exclude_patterns,
         )?;
     }
 
@@ -235,7 +277,13 @@ fn list_archive(
         if !member_matches(&entry.path, &spec.member_paths) {
             continue;
         }
-        names.push(entry.path);
+        if matches_exclude(&entry.path, &spec.exclude_patterns)? {
+            continue;
+        }
+        let Some(display_path) = strip_member_components(&entry.path, spec.strip_components) else {
+            continue;
+        };
+        names.push(display_path);
     }
 
     if names.is_empty() {
@@ -260,8 +308,15 @@ fn extract_archive(
         if !member_matches(&entry.path, &spec.member_paths) {
             continue;
         }
+        if matches_exclude(&entry.path, &spec.exclude_patterns)? {
+            continue;
+        }
 
-        let safe_path = sanitize_member_path(&entry.path)?;
+        let Some(stripped_path) = strip_member_components(&entry.path, spec.strip_components)
+        else {
+            continue;
+        };
+        let safe_path = sanitize_member_path(&stripped_path)?;
         match entry.kind {
             TarEntryKind::Directory => {
                 if spec.to_stdout {
@@ -298,6 +353,7 @@ fn append_member(
     listed_paths: &[String],
     source: &str,
     member_name: &str,
+    exclude_patterns: &[String],
 ) -> Result<(), SandboxError> {
     if let Some(link_target) = filesystem.read_link(source)? {
         append_symlink(archive, member_name, &link_target)?;
@@ -318,6 +374,9 @@ fn append_member(
             } else {
                 format!("{member_name}/{suffix}")
             };
+            if matches_exclude(&entry_name, exclude_patterns)? {
+                continue;
+            }
 
             if let Some(link_target) = filesystem.read_link(&descendant)? {
                 append_symlink(archive, &entry_name, &link_target)?;
@@ -333,6 +392,14 @@ fn append_member(
 
     let contents = filesystem.read_file(source)?;
     append_file(archive, member_name, &contents)
+}
+
+fn parse_strip_components(value: &str) -> Result<usize, SandboxError> {
+    value.parse::<usize>().map_err(|_| {
+        SandboxError::InvalidRequest(
+            "tar --strip-components requires a non-negative integer".to_string(),
+        )
+    })
 }
 
 fn append_file(
@@ -447,6 +514,68 @@ fn archive_name(original: &str) -> String {
     } else {
         rendered
     }
+}
+
+fn strip_member_components(path: &str, count: usize) -> Option<String> {
+    if count == 0 {
+        return Some(path.to_string());
+    }
+    let parts = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() <= count {
+        return None;
+    }
+    Some(parts[count..].join("/"))
+}
+
+fn matches_exclude(path: &str, patterns: &[String]) -> Result<bool, SandboxError> {
+    let basename = path.rsplit('/').next().unwrap_or(path);
+    for pattern in patterns {
+        let regex = glob_pattern_regex(pattern)?;
+        if regex.is_match(path) || (!pattern.contains('/') && regex.is_match(basename)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn glob_pattern_regex(pattern: &str) -> Result<Regex, SandboxError> {
+    let mut escaped = String::from("^");
+    let chars = pattern.chars().collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < chars.len() {
+        match chars[index] {
+            '*' => escaped.push_str("[^/]*"),
+            '?' => escaped.push('.'),
+            '[' => {
+                let mut end = index + 1;
+                while end < chars.len() && chars[end] != ']' {
+                    end += 1;
+                }
+                if end >= chars.len() {
+                    escaped.push_str("\\[");
+                } else {
+                    escaped.push('[');
+                    for inner in &chars[index + 1..end] {
+                        if matches!(*inner, '\\' | '^') {
+                            escaped.push('\\');
+                        }
+                        escaped.push(*inner);
+                    }
+                    escaped.push(']');
+                    index = end;
+                }
+            }
+            other => escaped.push_str(&regex::escape(&other.to_string())),
+        }
+        index += 1;
+    }
+    escaped.push('$');
+    Regex::new(&escaped).map_err(|error| {
+        SandboxError::InvalidRequest(format!("tar exclude pattern is invalid: {error}"))
+    })
 }
 
 fn member_matches(path: &str, filters: &[String]) -> bool {

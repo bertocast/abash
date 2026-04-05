@@ -68,6 +68,7 @@ class _CurlTestHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(length)
             self.server.last_body = body  # type: ignore[attr-defined]
             self.server.last_header = self.headers.get("X-Injected", "")  # type: ignore[attr-defined]
+            self.server.last_client_header = self.headers.get("X-Client", "")  # type: ignore[attr-defined]
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.send_header("Content-Length", str(len(body)))
@@ -85,6 +86,7 @@ class _CurlServer:
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), _CurlTestHandler)
         self.httpd.last_body = b""  # type: ignore[attr-defined]
         self.httpd.last_header = ""  # type: ignore[attr-defined]
+        self.httpd.last_client_header = ""  # type: ignore[attr-defined]
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
         self.base_url = f"http://127.0.0.1:{self.httpd.server_port}"
@@ -1051,6 +1053,25 @@ async def test_script_mode_sqlite3_reads_sql_from_stdin() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_sqlite3_supports_tables_and_schema_meta_commands() -> None:
+    async with Bash() as bash:
+        await bash.exec(
+            [
+                "sqlite3",
+                "/workspace/meta.db",
+                "CREATE TABLE users(id INT, name TEXT); CREATE VIEW active_users AS SELECT * FROM users",
+            ]
+        )
+        tables = await bash.exec(["sqlite3", "/workspace/meta.db", ".tables"])
+        schema = await bash.exec(["sqlite3", "/workspace/meta.db", ".schema users"])
+
+    assert tables.exit_code == 0
+    assert tables.stdout == "active_users\nusers\n"
+    assert schema.exit_code == 0
+    assert "CREATE TABLE users(id INT, name TEXT);" in schema.stdout
+
+
+@pytest.mark.anyio
 async def test_argv_mode_gzip_compresses_files_and_respects_keep_flag() -> None:
     async with Bash() as bash:
         await bash.write_file("/workspace/demo.txt", "hello gzip")
@@ -1147,6 +1168,46 @@ async def test_argv_mode_tar_blocks_parent_traversal_members() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_tar_supports_exclude_and_strip_components() -> None:
+    async with Bash() as bash:
+        await bash.mkdir("/workspace/src/nested", parents=True)
+        await bash.write_file("/workspace/src/nested/data.txt", "hello stripped")
+        await bash.write_file("/workspace/src/nested/skip.log", "ignore me")
+        created = await bash.exec(
+            [
+                "tar",
+                "-cf",
+                "/workspace/demo.tar",
+                "-C",
+                "/workspace/src",
+                "--exclude",
+                "*.log",
+                "nested",
+            ]
+        )
+        listed = await bash.exec(["tar", "-tf", "/workspace/demo.tar"])
+        await bash.mkdir("/workspace/out", parents=True)
+        extracted = await bash.exec(
+            [
+                "tar",
+                "-xf",
+                "/workspace/demo.tar",
+                "-C",
+                "/workspace/out",
+                "--strip-components",
+                "1",
+            ]
+        )
+        restored = await bash.read_file("/workspace/out/data.txt")
+
+    assert created.exit_code == 0
+    assert "nested/data.txt\n" in listed.stdout
+    assert "skip.log" not in listed.stdout
+    assert extracted.exit_code == 0
+    assert restored == "hello stripped"
+
+
+@pytest.mark.anyio
 async def test_argv_mode_chmod_updates_stat_mode_bits() -> None:
     async with Bash() as bash:
         await bash.write_file("/workspace/demo.txt", "hello chmod")
@@ -1210,6 +1271,18 @@ async def test_argv_mode_python_alias_forwards_to_python3() -> None:
 
 
 @pytest.mark.anyio
+async def test_argv_mode_python3_supports_stdin_script_with_dash_path() -> None:
+    async with Bash() as bash:
+        result = await bash.exec(
+            ["python3", "-", "bert"],
+            stdin="import sys\nprint(sys.argv[1])\nprint('stdin-python')\n",
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "bert\nstdin-python\n"
+
+
+@pytest.mark.anyio
 async def test_argv_mode_js_exec_executes_inline_code_and_reads_workspace_files() -> None:
     async with Bash() as bash:
         await bash.write_file("/workspace/demo.txt", "hello js-exec")
@@ -1240,6 +1313,18 @@ async def test_argv_mode_js_exec_syncs_workspace_mutations_back() -> None:
     assert result.exit_code == 0
     assert result.stdout == "from js-exec\n"
     assert restored == "from js-exec"
+
+
+@pytest.mark.anyio
+async def test_argv_mode_js_exec_supports_dash_stdin_script_after_separator() -> None:
+    async with Bash() as bash:
+        result = await bash.exec(
+            ["js-exec", "--", "-", "bert"],
+            stdin="console.log(process.argv[2]); console.log('stdin-js');\n",
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "bert\nstdin-js\n"
 
 
 @pytest.mark.anyio
@@ -2683,6 +2768,49 @@ async def test_curl_supports_post_output_file_and_injected_headers() -> None:
     assert written == "posted"
     assert server.httpd.last_body == b"posted"  # type: ignore[attr-defined]
     assert server.httpd.last_header == "secret"  # type: ignore[attr-defined]
+
+
+@pytest.mark.anyio
+async def test_curl_supports_headers_data_binary_and_fail() -> None:
+    with _CurlServer() as server:
+        policy = NetworkPolicy(
+            allowed_origins=[
+                NetworkOrigin(
+                    origin=server.base_url,
+                    injected_headers={"X-Injected": "secret"},
+                )
+            ],
+            allowed_methods=["GET", "POST"],
+            allowed_schemes=["http"],
+            block_private_ranges=False,
+        )
+        async with Bash(network_policy=policy) as bash:
+            posted = await bash.exec(
+                [
+                    "curl",
+                    "-s",
+                    "-H",
+                    "X-Client: demo",
+                    "--data-binary",
+                    "@-",
+                    f"{server.base_url}/echo",
+                ],
+                stdin="binary-body",
+                network_enabled=True,
+            )
+            failed = await bash.exec(
+                ["curl", "-f", f"{server.base_url}/missing"],
+                network_enabled=True,
+            )
+
+    assert posted.exit_code == 0
+    assert posted.stdout == "binary-body"
+    assert server.httpd.last_body == b"binary-body"  # type: ignore[attr-defined]
+    assert server.httpd.last_header == "secret"  # type: ignore[attr-defined]
+    assert server.httpd.last_client_header == "demo"  # type: ignore[attr-defined]
+    assert failed.exit_code == 22
+    assert failed.stdout == ""
+    assert failed.stderr == "curl: (22) The requested URL returned error: 404\n"
 
 
 @pytest.mark.anyio

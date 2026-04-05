@@ -176,20 +176,25 @@ fn run_host_python(
     } else if let Some(module) = spec.module {
         command.arg("-m").arg(module);
     } else if let Some(script_file) = spec.script_file {
-        let mapped = bridge.map_sandbox_path(&script_file);
-        if !mapped.exists() {
-            bridge.cleanup();
-            return Ok(with_metadata(
-                cli_error(
-                    format!(
-                        "python3: can't open file '{script_file}': [Errno 2] No such file or directory\n"
+        if script_file == "-" {
+            command.arg("-");
+            stdin_bytes.extend_from_slice(stdin);
+        } else {
+            let mapped = bridge.map_sandbox_path(&script_file);
+            if !mapped.exists() {
+                bridge.cleanup();
+                return Ok(with_metadata(
+                    cli_error(
+                        format!(
+                            "python3: can't open file '{script_file}': [Errno 2] No such file or directory\n"
+                        ),
+                        2,
                     ),
-                    2,
-                ),
-                metadata,
-            ));
+                    metadata,
+                ));
+            }
+            command.arg(mapped);
         }
-        command.arg(mapped);
     } else {
         command.arg("-");
         stdin_bytes.extend_from_slice(stdin);

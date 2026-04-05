@@ -5,19 +5,25 @@ pub(crate) struct CurlSpec {
     pub method: String,
     pub url: String,
     pub body: Option<Vec<u8>>,
+    pub headers: Vec<(String, String)>,
     pub output_path: Option<String>,
     pub follow_redirects: bool,
     pub include_headers: bool,
     pub head_only: bool,
+    pub silent: bool,
+    pub fail_on_http_error: bool,
 }
 
 pub(crate) fn parse_spec(args: &[String], stdin: Vec<u8>) -> Result<CurlSpec, SandboxError> {
     let mut method = None;
     let mut data = None;
+    let mut headers = Vec::new();
     let mut output_path = None;
     let mut follow_redirects = false;
     let mut include_headers = false;
     let mut head_only = false;
+    let mut silent = false;
+    let mut fail_on_http_error = false;
     let mut url = None;
     let mut index = 0usize;
 
@@ -45,6 +51,28 @@ pub(crate) fn parse_spec(args: &[String], stdin: Vec<u8>) -> Result<CurlSpec, Sa
                 });
                 index += 2;
             }
+            "--data-binary" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(SandboxError::InvalidRequest(
+                        "curl --data-binary requires a request body".to_string(),
+                    ));
+                };
+                data = Some(if value == "@-" {
+                    stdin.clone()
+                } else {
+                    value.as_bytes().to_vec()
+                });
+                index += 2;
+            }
+            "-H" | "--header" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(SandboxError::InvalidRequest(
+                        "curl -H requires a header".to_string(),
+                    ));
+                };
+                headers.push(parse_header(value)?);
+                index += 2;
+            }
             "-o" | "--output" => {
                 let Some(value) = args.get(index + 1) else {
                     return Err(SandboxError::InvalidRequest(
@@ -65,6 +93,14 @@ pub(crate) fn parse_spec(args: &[String], stdin: Vec<u8>) -> Result<CurlSpec, Sa
             "-I" | "--head" => {
                 head_only = true;
                 method = Some("HEAD".to_string());
+                index += 1;
+            }
+            "-s" | "--silent" => {
+                silent = true;
+                index += 1;
+            }
+            "-f" | "--fail" => {
+                fail_on_http_error = true;
                 index += 1;
             }
             _ if arg.starts_with('-') => {
@@ -103,11 +139,29 @@ pub(crate) fn parse_spec(args: &[String], stdin: Vec<u8>) -> Result<CurlSpec, Sa
         }),
         url,
         body: data,
+        headers,
         output_path,
         follow_redirects,
         include_headers,
         head_only,
+        silent,
+        fail_on_http_error,
     })
+}
+
+fn parse_header(value: &str) -> Result<(String, String), SandboxError> {
+    let Some((name, header_value)) = value.split_once(':') else {
+        return Err(SandboxError::InvalidRequest(
+            "curl -H requires NAME: VALUE".to_string(),
+        ));
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(SandboxError::InvalidRequest(
+            "curl -H requires a non-empty header name".to_string(),
+        ));
+    }
+    Ok((name.to_string(), header_value.trim_start().to_string()))
 }
 
 pub(crate) fn render_response(
@@ -149,5 +203,30 @@ mod tests {
         assert_eq!(spec.method, "POST");
         assert_eq!(spec.url, "https://example.com");
         assert_eq!(spec.body, Some(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn parse_headers_and_fail_flags() {
+        let spec = parse_spec(
+            &[
+                "-H".to_string(),
+                "Accept: application/json".to_string(),
+                "-s".to_string(),
+                "-f".to_string(),
+                "--data-binary".to_string(),
+                "@-".to_string(),
+                "https://example.com".to_string(),
+            ],
+            b"body".to_vec(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            spec.headers,
+            vec![("Accept".to_string(), "application/json".to_string())]
+        );
+        assert!(spec.silent);
+        assert!(spec.fail_on_http_error);
+        assert_eq!(spec.body, Some(b"body".to_vec()));
     }
 }

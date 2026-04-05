@@ -15,43 +15,52 @@ pub(crate) struct Spec {
 }
 
 pub(crate) fn parse(args: &[String]) -> Result<Spec, ExecutionResult> {
+    let mut spec = Spec {
+        code: None,
+        script_file: None,
+        script_args: Vec::new(),
+    };
+
     if args.is_empty() {
-        return Ok(Spec {
-            code: None,
-            script_file: None,
-            script_args: Vec::new(),
-        });
+        return Ok(spec);
     }
 
-    match args.first().map(String::as_str) {
-        Some("-c") => {
-            let Some(code) = args.get(1) else {
+    let index = 0usize;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-c" => {
+                let Some(code) = args.get(index + 1) else {
+                    return Err(cli_error(
+                        "js-exec: option requires an argument -- 'c'\n",
+                        2,
+                    ));
+                };
+                spec.code = Some(code.clone());
+                spec.script_args = args[index + 2..].to_vec();
+                return Ok(spec);
+            }
+            "--" => {
+                if let Some(script) = args.get(index + 1) {
+                    spec.script_file = Some(script.clone());
+                    spec.script_args = args[index + 2..].to_vec();
+                }
+                return Ok(spec);
+            }
+            value if value.starts_with('-') && value != "-" => {
                 return Err(cli_error(
-                    "js-exec: option requires an argument -- 'c'\n",
+                    format!("js-exec: unrecognized option '{value}'\n"),
                     2,
                 ));
-            };
-            Ok(Spec {
-                code: Some(code.clone()),
-                script_file: None,
-                script_args: args[2..].to_vec(),
-            })
+            }
+            value => {
+                spec.script_file = Some(value.to_string());
+                spec.script_args = args[index + 1..].to_vec();
+                return Ok(spec);
+            }
         }
-        Some(flag) if flag.starts_with('-') => Err(cli_error(
-            format!("js-exec: unrecognized option '{flag}'\n"),
-            2,
-        )),
-        Some(script) => Ok(Spec {
-            code: None,
-            script_file: Some(script.to_string()),
-            script_args: args[1..].to_vec(),
-        }),
-        None => Ok(Spec {
-            code: None,
-            script_file: None,
-            script_args: Vec::new(),
-        }),
     }
+
+    Ok(spec)
 }
 
 pub(crate) fn execute(
@@ -99,20 +108,25 @@ pub(crate) fn execute(
     if let Some(code) = spec.code {
         command.arg("-e").arg(code);
     } else if let Some(script_file) = spec.script_file {
-        let mapped = bridge.map_sandbox_path(&script_file);
-        if !mapped.exists() {
-            bridge.cleanup();
-            return Ok(with_metadata(
-                cli_error(
-                    format!(
-                        "js-exec: can't open file '{script_file}': No such file or directory\n"
+        if script_file == "-" {
+            command.arg("-");
+            stdin_bytes.extend_from_slice(stdin);
+        } else {
+            let mapped = bridge.map_sandbox_path(&script_file);
+            if !mapped.exists() {
+                bridge.cleanup();
+                return Ok(with_metadata(
+                    cli_error(
+                        format!(
+                            "js-exec: can't open file '{script_file}': No such file or directory\n"
+                        ),
+                        2,
                     ),
-                    2,
-                ),
-                metadata,
-            ));
+                    metadata,
+                ));
+            }
+            command.arg(mapped);
         }
-        command.arg(mapped);
     } else {
         command.arg("-");
         stdin_bytes.extend_from_slice(stdin);

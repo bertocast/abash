@@ -46,7 +46,7 @@ Command-name parity with `just-bash` is done. The remaining work is mostly behav
 - [x] add `continue`
 - [x] evaluate command substitution
 - [x] evaluate subshell execution
-- [ ] deepen `awk`, `jq`, `yq`, `xan`, `curl`, `sqlite3`, `tar`, `python3`, `js-exec` where narrow behavior still blocks real workflows
+- [x] deepen `awk`, `jq`, `yq`, `xan`, `curl`, `sqlite3`, `tar`, `python3`, `js-exec` where narrow behavior still blocks real workflows
 
 ### Tier 4: Backend Maturity
 
