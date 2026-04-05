@@ -122,6 +122,8 @@ Command-name parity history is tracked in [docs/pending_commands.md](docs/pendin
 - `host_cow` still does not support deleting host-backed paths or whiteout semantics
 - script compatibility is intentionally narrow and not full bash parity
 - the `nsjail` backend is now a narrow Linux-only argv backend; it still requires an explicit `nsjail` binary, host-backed mounts, and keeps script/network work out of scope for now
+- `nsjail` remains the planned Linux real-shell path for now; no alternate Linux sandbox backend is currently on the roadmap
+- `js-exec` stays host-runtime based for now; a stronger isolated JavaScript runtime is deferred unless the threat model or embedder demand changes
 
 ## Repository Layout
 

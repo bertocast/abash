@@ -125,15 +125,17 @@
 - policy covers schemes, origins, optional path prefixes, methods, redirects, timeout, response size, and optional private-range blocking
 - host-injected headers are configured per allowed origin and do not surface in metadata by default
 
-## Modeled but Not Implemented
-
-- stronger Linux sandbox strategy decisions beyond the current narrow `nsjail` path
-
 ## Limited Real-Shell Support
 
 - Linux-only `real_shell` sessions can now execute argv requests through `nsjail`
 - current real-shell scope is intentionally narrow: argv only, host-backed mounts only, explicit `nsjail` binary required
 - script-mode dispatch, network-enabled runs, and per-request filesystem overrides are still rejected on that backend
+- `nsjail` is the planned Linux real-shell path for now; no second Linux sandbox backend is currently on the product roadmap
+
+## JavaScript Runtime Direction
+
+- `js-exec` currently stays on the host-runtime path with workspace sync and best-effort patching
+- a stronger isolated JavaScript runtime is not on the active roadmap today; it will only be revisited if the current threat model or embedding demand changes
 
 ## Not Claimed
 

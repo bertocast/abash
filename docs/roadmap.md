@@ -51,8 +51,8 @@ Command-name parity with `just-bash` is done. The remaining work is mostly behav
 ### Tier 4: Backend Maturity
 
 - [x] activate the Linux real-shell backend behind the intended isolation model
-- [ ] define the long-term story for `nsjail` vs any alternative Linux sandbox strategy
-- [ ] decide whether a stronger JavaScript isolation mode is worth adding alongside host-runtime `js-exec`
+- [x] define the long-term story for `nsjail` vs any alternative Linux sandbox strategy
+- [x] decide whether a stronger JavaScript isolation mode is worth adding alongside host-runtime `js-exec`
 
 ### Tier 5: Product Defaults To Revisit Only With Demand
 
@@ -65,3 +65,5 @@ Command-name parity with `just-bash` is done. The remaining work is mostly behav
 - `docs/known-limitations.md` remains the honest source for current behavior.
 - this roadmap tracks the next valuable lifts, not every missing flag
 - `just-bash` is a useful reference point, but not every upstream choice should become a default in `abash`
+- Tier 4 decision: Linux real-shell work stays centered on `nsjail` for now; no second Linux sandbox backend is planned until the current path blocks a real deployment need.
+- Tier 4 decision: `js-exec` stays host-runtime based for now; a stronger isolated JavaScript runtime is deferred unless threat-model or embedding demand changes materially.

@@ -11,12 +11,14 @@
 - detached runs are in-process only and are lost if the embedding interpreter exits
 - `real_shell` currently requires Linux plus an explicit `nsjail` binary on `PATH` or `ABASH_NSJAIL_BIN`
 - the current real-shell backend only supports argv execution with host-backed mounts, and still rejects script mode, network-enabled runs, and per-request filesystem-mode changes
+- `nsjail` remains the only planned Linux real-shell isolation path for now; no alternate Linux backend is currently scheduled
 - multiple detached runs can be created per `Bash` session, but execution still serializes through one session lock to preserve stateful shell semantics
 - `BashRun.stream_events()` and `stream_output()` are live at the run-event level, but stdout/stderr are still emitted as buffered chunks rather than byte-streamed process pipes
 - custom commands can run inside script dispatch, can receive `CustomCommandContext`, and can delegate one nested `exec()` / `exec_script()` request, but top-level hooks still only apply at the outer request boundary and AST rewrite plugins are still out of scope
 - pipeline execution is buffered and sequential rather than streaming or process-concurrent
 - shell state defaults to session-persistent behavior; `session_state="per_exec"` resets `cwd`, exported env, aliases, and history between calls, but filesystem contents remain shared
 - `replace_env=True` only affects the current request's env merge; it does not undo persisted `export` state for later calls
+- `js-exec` still uses the host JavaScript runtime with workspace sync and best-effort patching; a stronger isolated JS runtime is not currently planned
 - variable support is limited to explicit request env, `export`, script-scoped assignments, and command-local assignments; there is no shell variable state that persists across separate exec calls beyond exported env
 - globbing is limited to script arguments; command names, redirection targets, and argv mode stay literal
 - control flow is still intentionally partial: `case`, subshells, and narrow `return`, `break`, `continue`, and `$()` command substitution now work within their valid script contexts, but backtick substitution, `select`, `coproc`, and job-control semantics are still unsupported

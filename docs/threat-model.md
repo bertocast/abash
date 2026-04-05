@@ -41,3 +41,4 @@
 - copy-on-write overlay does not yet model deletion semantics
 - detached execution exists only as an in-process, single-active-run handle model with buffered observability
 - Linux real-shell execution now exists only through a narrow `nsjail` argv path; broader shell/script/network semantics still must not be inferred from crate presence alone
+- `js-exec` remains a host-runtime feature; stronger isolated JavaScript execution is deferred, so embedders should keep treating it as a higher-trust extension surface than the virtual shell builtins
