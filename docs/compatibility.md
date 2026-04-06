@@ -58,6 +58,7 @@
 - narrow `whoami`, `hostname`, `help`, and `clear`: supported
 - buffered per-session `history`: supported
 - default session-persistent `cd`, `export`, aliases, and history, with opt-in `per_exec` reset mode: supported
+- session-persistent state remains the default product direction; `per_exec` is the explicit alternate mode rather than the planned default
 - narrow `alias` / `unalias`: supported
 - narrow `bash` / `sh` with `-c <script>` or one script path: supported, child-shell state stays isolated
 - narrow `curl` with policy-gated `-X`, `-d`, `--data-binary`, `-H`, `-I`, `-i`, `-o`, `-L`, `-s`, and `-f`: supported
@@ -79,6 +80,7 @@
 - `python` alias to `python3`: supported
 - narrow host-backed `python3` with `-c`, `-m`, script-file, `-` stdin-script mode, plain stdin execution, and workspace file sync: supported
 - narrow host-backed `js-exec` with `-c`, script-file, `--` separator, `-` stdin-script mode, plain stdin execution, and workspace file sync: supported
+- AST/plugin rewrite hooks: not implemented, not on the active extension roadmap
 - narrow `xan` CSV toolkit with `headers`, `count`, `head`, `tail`, `slice`, `reverse`, `behead`, `cat`, `select`, `drop`, `rename`, `enum`, `search`, `sort`, `dedup`, `top`, `frequency`, `stats`, `agg`, `groupby`, and `filter`: supported
 - `egrep` alias to current regex `grep`: supported
 - `fgrep` alias to current fixed-string `grep`: supported
@@ -140,6 +142,7 @@
 ## Not Claimed
 
 - full bash compatibility
+- full GNU/bash fidelity as an active roadmap target
 - unrestricted host binary execution
 - unrestricted host filesystem access
 - unrestricted internet access

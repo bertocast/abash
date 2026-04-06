@@ -93,6 +93,7 @@ Command-name parity history is tracked in [docs/pending_commands.md](docs/pendin
 - Output-producing builtins still emit stdout/stderr as buffered event chunks rather than byte-streamed process pipes.
 - `Bash(session_state="per_exec")` opts into `just-bash`-style shell-state reset between calls while keeping the filesystem shared.
 - `replace_env=True` opts one call into request-env-only execution without clearing persisted shell state globally.
+- session-persistent shell state remains the default product model; `per_exec` stays the explicit opt-in reset mode.
 
 ## Extension Surface
 
@@ -101,6 +102,7 @@ Command-name parity history is tracked in [docs/pending_commands.md](docs/pendin
 - `pre_exec_hook` can rewrite top-level requests before dispatch.
 - `post_exec_hook` can observe or replace top-level results after dispatch.
 - Hooks remain intentionally narrow; they operate on the top-level request/result boundary, not on the internal script AST.
+- AST/plugin rewrite hooks are not on the active product line today; current hooks plus custom-command composition are the supported extension surface.
 
 ## Script Compatibility
 
@@ -121,6 +123,7 @@ Command-name parity history is tracked in [docs/pending_commands.md](docs/pendin
 - detached runs can queue, but shell mutation still serializes through one session lock
 - `host_cow` still does not support deleting host-backed paths or whiteout semantics
 - script compatibility is intentionally narrow and not full bash parity
+- full GNU/bash fidelity is not the current product target; shell and builtin depth should grow only where real workflows are blocked
 - the `nsjail` backend is now a narrow Linux-only argv backend; it still requires an explicit `nsjail` binary, host-backed mounts, and keeps script/network work out of scope for now
 - `nsjail` remains the planned Linux real-shell path for now; no alternate Linux sandbox backend is currently on the roadmap
 - `js-exec` stays host-runtime based for now; a stronger isolated JavaScript runtime is deferred unless the threat model or embedder demand changes
