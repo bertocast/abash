@@ -29,7 +29,7 @@
 - single and double quotes: supported
 - `#` comments: supported
 - pipes (`|`): supported, buffered and sequential
-- redirects (`<`, `>`, `>>`, `2>`, `2>>`, `2>&1`): supported
+- redirects (`<`, `<<<`, `<<`, `>`, `>>`, `2>`, `2>>`, `2>&1`): supported
 - command chaining (`;`, `&&`, `||`): supported
 - minimal control flow (`if ...; then ...; fi`, `elif`, optional `else`, `case ... in ... esac`, subshell blocks `( ... )`, `while ...; do ...; done`, `until ...; do ...; done`, `for ...; do ...; done`): supported
 - narrow `name() { ...; }` functions plus `local`, `return`, `break`, and `continue`: supported
@@ -111,6 +111,7 @@
 - narrow `$()` command substitution: supported
 - subshell execution `( ... )`: supported
 - backtick command substitution: not implemented
+- heredoc tab-stripping `<<-`: not implemented
 - broader fd juggling beyond `2>`, `2>>`, `2>&1`: not implemented
 
 ## Filesystem Matrix

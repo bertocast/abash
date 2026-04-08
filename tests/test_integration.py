@@ -143,6 +143,26 @@ async def test_script_mode_supports_pipes_and_redirections() -> None:
 
 
 @pytest.mark.anyio
+async def test_script_mode_supports_here_string_and_heredoc() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script("cat <<< hello; cat <<EOF\nworld\nEOF")
+
+    assert result.exit_code == 0
+    assert result.stdout == "hello\nworld\n"
+
+
+@pytest.mark.anyio
+async def test_script_mode_supports_quoted_heredoc_without_expansion() -> None:
+    async with Bash() as bash:
+        result = await bash.exec_script(
+            "NAME=bert; cat <<'EOF'\n$NAME\nEOF\ncat <<EOF\n$NAME\nEOF"
+        )
+
+    assert result.exit_code == 0
+    assert result.stdout == "$NAME\nbert\n"
+
+
+@pytest.mark.anyio
 async def test_script_mode_supports_append_and_short_circuiting() -> None:
     async with Bash() as bash:
         result = await bash.exec_script(

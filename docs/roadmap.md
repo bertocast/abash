@@ -15,7 +15,7 @@ Command-name parity is still closed. The remaining work is mostly shell depth, e
 
 ## Tier 1: Shell And Exec Surface
 
-- [ ] add heredocs and here-strings, plus the parser/runtime plumbing they need
+- [x] add heredocs and here-strings, plus the parser/runtime plumbing they need
 - [ ] add `raw_script=True` so multi-line scripts can preserve leading whitespace when needed
 - [ ] add argv-bypass `args=[...]` support for first-command execution without shell parsing
 - [ ] expose richer execution limits beyond timeout/output size: call depth, command count, loop iterations, and heredoc/input size

@@ -58,9 +58,9 @@ use abash_core::{
     SandboxExtensions, SandboxFilesystem, SessionBackend, SessionState, TerminationReason,
 };
 use script::{
-    is_valid_assignment_name, parse_script, CaseBlock, ChainOp, ControlStep, ForBlock, FunctionDef,
-    IfBlock, Pipeline, RedirectSpec, ReturnStep, ScriptStep, ScriptWord, SimpleCommand, StepKind,
-    SubshellBlock, WhileBlock,
+    expand_text, is_valid_assignment_name, parse_script, CaseBlock, ChainOp, ControlStep, ForBlock,
+    FunctionDef, IfBlock, Pipeline, RedirectSpec, ReturnStep, ScriptStep, ScriptWord,
+    SimpleCommand, StepKind, SubshellBlock, WhileBlock,
 };
 use ureq::{http, Agent, RequestExt};
 use url::Url;
@@ -1200,12 +1200,19 @@ impl VirtualSession {
             })?;
             let args = self.expand_script_args(&runtime.cwd, &command_name, &expanded_argv[1..])?;
 
-            let stdin = if let Some(path) = input_redirect(command) {
-                let resolved = resolve_sandbox_path(
-                    &runtime.cwd,
-                    &path.expand(&command_env, &runtime.positional_args)?,
-                )?;
-                self.read_path(&resolved)?
+            let stdin = if let Some(input) = self.resolve_input_redirect(
+                runtime,
+                command,
+                &command_env,
+                config,
+                cancel_flag,
+                timeout_ms,
+                started,
+                network_enabled,
+                extensions,
+                base_metadata,
+            )? {
+                input
             } else if let Some(input) = piped_stdin.take() {
                 input
             } else {
@@ -2078,7 +2085,8 @@ impl VirtualSession {
 
         for redirect in redirects {
             match redirect {
-                RedirectSpec::Input(_) => {}
+                RedirectSpec::Input(_) | RedirectSpec::HereString(_) | RedirectSpec::HereDoc(_) => {
+                }
                 RedirectSpec::StdoutTruncate(path) => {
                     stdout_target = StreamTarget::File(resolve_file_target(
                         cwd,
@@ -2142,6 +2150,72 @@ impl VirtualSession {
         }
 
         Ok(routed)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_input_redirect(
+        &mut self,
+        runtime: &RuntimeState,
+        command: &SimpleCommand,
+        command_env: &BTreeMap<String, String>,
+        config: &SandboxConfig,
+        cancel_flag: &AtomicBool,
+        timeout_ms: Option<u64>,
+        started: Instant,
+        network_enabled: bool,
+        extensions: Option<&dyn SandboxExtensions>,
+        base_metadata: &BTreeMap<String, String>,
+    ) -> Result<Option<Vec<u8>>, SandboxError> {
+        for redirect in &command.redirects {
+            match redirect {
+                RedirectSpec::Input(path) => {
+                    let resolved = resolve_sandbox_path(
+                        &runtime.cwd,
+                        &path.expand(command_env, &runtime.positional_args)?,
+                    )?;
+                    return Ok(Some(self.read_path(&resolved)?));
+                }
+                RedirectSpec::HereString(word) => {
+                    let expanded = self.expand_script_word(
+                        runtime,
+                        word,
+                        config,
+                        cancel_flag,
+                        timeout_ms,
+                        started,
+                        network_enabled,
+                        extensions,
+                        base_metadata,
+                    )?;
+                    let mut bytes = expanded.into_bytes();
+                    bytes.push(b'\n');
+                    return Ok(Some(bytes));
+                }
+                RedirectSpec::HereDoc(spec) => {
+                    let rendered = if spec.expandable {
+                        let expanded =
+                            expand_text(&spec.content, command_env, &runtime.positional_args)?;
+                        self.substitute_command_outputs(
+                            runtime,
+                            &expanded,
+                            config,
+                            cancel_flag,
+                            timeout_ms,
+                            started,
+                            network_enabled,
+                            extensions,
+                            base_metadata,
+                        )?
+                    } else {
+                        spec.content.clone()
+                    };
+                    return Ok(Some(rendered.into_bytes()));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(None)
     }
 
     fn write_redirect_file(&mut self, write: &PendingFileWrite) -> Result<(), SandboxError> {
@@ -4800,7 +4874,7 @@ fn validate_pipeline_redirections(
     index: usize,
     command: &SimpleCommand,
 ) -> Result<(), SandboxError> {
-    if input_redirect(command).is_some() && index > 0 {
+    if has_input_redirect(command) && index > 0 {
         return Err(SandboxError::InvalidRequest(
             "input redirection is supported only for the first command in a pipeline".to_string(),
         ));
@@ -4813,15 +4887,13 @@ fn validate_pipeline_redirections(
     Ok(())
 }
 
-fn input_redirect(command: &SimpleCommand) -> Option<&ScriptWord> {
-    command
-        .redirects
-        .iter()
-        .rev()
-        .find_map(|redirect| match redirect {
-            RedirectSpec::Input(path) => Some(path),
-            _ => None,
-        })
+fn has_input_redirect(command: &SimpleCommand) -> bool {
+    command.redirects.iter().any(|redirect| {
+        matches!(
+            redirect,
+            RedirectSpec::Input(_) | RedirectSpec::HereString(_) | RedirectSpec::HereDoc(_)
+        )
+    })
 }
 
 fn has_stdout_redirect(command: &SimpleCommand) -> bool {

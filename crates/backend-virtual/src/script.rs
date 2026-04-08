@@ -12,11 +12,19 @@ pub(crate) enum ChainOp {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RedirectSpec {
     Input(ScriptWord),
+    HereString(ScriptWord),
+    HereDoc(HereDocSpec),
     StdoutTruncate(ScriptWord),
     StdoutAppend(ScriptWord),
     StderrTruncate(ScriptWord),
     StderrAppend(ScriptWord),
     StderrToStdout,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HereDocSpec {
+    pub content: String,
+    pub expandable: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,6 +138,8 @@ pub(crate) enum Token {
     LBrace,
     RBrace,
     RedirectIn,
+    RedirectHereString,
+    RedirectHereDoc(HereDocSpec),
     RedirectOut,
     RedirectAppend,
     RedirectErrOut,
@@ -141,6 +151,14 @@ pub(crate) fn parse_script(source: &str) -> Result<Vec<ScriptStep>, SandboxError
     let tokens = tokenize(source)?;
     let mut parser = Parser::new(tokens);
     parser.parse()
+}
+
+pub(crate) fn expand_text(
+    text: &str,
+    env: &BTreeMap<String, String>,
+    positional_args: &[String],
+) -> Result<String, SandboxError> {
+    expand_part(text, env, positional_args)
 }
 
 impl ScriptWord {
@@ -224,6 +242,7 @@ fn tokenize(source: &str) -> Result<Vec<Token>, SandboxError> {
     let mut tokens = Vec::new();
     let mut chars = source.chars().peekable();
     let mut builder = WordBuilder::default();
+    let mut pending_heredocs = Vec::new();
 
     while let Some(ch) = chars.next() {
         if builder.has_open_command_substitution() {
@@ -236,6 +255,7 @@ fn tokenize(source: &str) -> Result<Vec<Token>, SandboxError> {
             '\n' => {
                 builder.flush(&mut tokens);
                 tokens.push(Token::Semicolon);
+                flush_pending_heredocs(&mut chars, &mut tokens, &mut pending_heredocs)?;
             }
             '2' if builder.is_empty() => {
                 if chars.next_if_eq(&'>').is_some() {
@@ -361,7 +381,21 @@ fn tokenize(source: &str) -> Result<Vec<Token>, SandboxError> {
             }
             '<' => {
                 builder.flush(&mut tokens);
-                tokens.push(Token::RedirectIn);
+                if chars.next_if_eq(&'<').is_some() {
+                    if chars.next_if_eq(&'<').is_some() {
+                        tokens.push(Token::RedirectHereString);
+                    } else {
+                        if chars.next_if_eq(&'-').is_some() {
+                            return Err(SandboxError::InvalidRequest(
+                                "script heredoc tab-stripping (<<-) is not supported".to_string(),
+                            ));
+                        }
+                        let pending = parse_heredoc_header(&mut chars, &mut tokens)?;
+                        pending_heredocs.push(pending);
+                    }
+                } else {
+                    tokens.push(Token::RedirectIn);
+                }
             }
             '>' => {
                 builder.flush(&mut tokens);
@@ -376,7 +410,143 @@ fn tokenize(source: &str) -> Result<Vec<Token>, SandboxError> {
     }
 
     builder.flush(&mut tokens);
+    if !pending_heredocs.is_empty() {
+        return Err(SandboxError::InvalidRequest(
+            "unterminated heredoc in script".to_string(),
+        ));
+    }
     Ok(tokens)
+}
+
+struct PendingHereDoc {
+    token_index: usize,
+    delimiter: String,
+    expandable: bool,
+}
+
+fn parse_heredoc_header<I>(
+    chars: &mut std::iter::Peekable<I>,
+    tokens: &mut Vec<Token>,
+) -> Result<PendingHereDoc, SandboxError>
+where
+    I: Iterator<Item = char>,
+{
+    while matches!(chars.peek(), Some(' ' | '\t')) {
+        chars.next();
+    }
+
+    let Some(next) = chars.next() else {
+        return Err(SandboxError::InvalidRequest(
+            "heredoc requires a delimiter".to_string(),
+        ));
+    };
+
+    let (delimiter, expandable) = match next {
+        '\'' | '"' => {
+            let quote = next;
+            let mut value = String::new();
+            let mut closed = false;
+            for ch in chars.by_ref() {
+                if ch == quote {
+                    closed = true;
+                    break;
+                }
+                value.push(ch);
+            }
+            if !closed {
+                return Err(SandboxError::InvalidRequest(
+                    "unterminated heredoc delimiter in script".to_string(),
+                ));
+            }
+            (value, false)
+        }
+        '\n' => {
+            return Err(SandboxError::InvalidRequest(
+                "heredoc requires a delimiter".to_string(),
+            ));
+        }
+        value => {
+            let mut delimiter = String::from(value);
+            while let Some(peeked) = chars.peek().copied() {
+                match peeked {
+                    ' ' | '\t' | '\n' => break,
+                    _ => {
+                        delimiter.push(peeked);
+                        chars.next();
+                    }
+                }
+            }
+            (delimiter, true)
+        }
+    };
+
+    if delimiter.is_empty() {
+        return Err(SandboxError::InvalidRequest(
+            "heredoc requires a non-empty delimiter".to_string(),
+        ));
+    }
+
+    while matches!(chars.peek(), Some(' ' | '\t')) {
+        chars.next();
+    }
+
+    let token_index = tokens.len();
+    tokens.push(Token::RedirectHereDoc(HereDocSpec {
+        content: String::new(),
+        expandable,
+    }));
+
+    Ok(PendingHereDoc {
+        token_index,
+        delimiter,
+        expandable,
+    })
+}
+
+fn flush_pending_heredocs<I>(
+    chars: &mut std::iter::Peekable<I>,
+    tokens: &mut [Token],
+    pending_heredocs: &mut Vec<PendingHereDoc>,
+) -> Result<(), SandboxError>
+where
+    I: Iterator<Item = char>,
+{
+    while let Some(pending) = pending_heredocs.first() {
+        let mut content = String::new();
+        loop {
+            let mut line = String::new();
+            let mut saw_newline = false;
+            while let Some(ch) = chars.next() {
+                if ch == '\n' {
+                    saw_newline = true;
+                    break;
+                }
+                line.push(ch);
+            }
+
+            if line == pending.delimiter {
+                if let Some(Token::RedirectHereDoc(spec)) = tokens.get_mut(pending.token_index) {
+                    spec.content = content;
+                    spec.expandable = pending.expandable;
+                }
+                pending_heredocs.remove(0);
+                break;
+            }
+
+            if line.is_empty() && !saw_newline {
+                return Err(SandboxError::InvalidRequest(
+                    "unterminated heredoc in script".to_string(),
+                ));
+            }
+
+            content.push_str(&line);
+            if saw_newline {
+                content.push('\n');
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Default)]
@@ -781,6 +951,17 @@ impl Parser {
                 Some(Token::RedirectIn) => {
                     self.index += 1;
                     redirects.push(RedirectSpec::Input(self.expect_word("input redirection")?));
+                }
+                Some(Token::RedirectHereString) => {
+                    self.index += 1;
+                    redirects.push(RedirectSpec::HereString(
+                        self.expect_word("here-string redirection")?,
+                    ));
+                }
+                Some(Token::RedirectHereDoc(spec)) => {
+                    let spec = spec.clone();
+                    self.index += 1;
+                    redirects.push(RedirectSpec::HereDoc(spec));
                 }
                 Some(Token::RedirectOut) => {
                     self.index += 1;
@@ -1368,6 +1549,46 @@ mod tests {
         assert!(matches!(redirects[0], RedirectSpec::StderrTruncate(_)));
         assert!(matches!(redirects[1], RedirectSpec::StdoutTruncate(_)));
         assert!(matches!(redirects[2], RedirectSpec::StderrToStdout));
+    }
+
+    #[test]
+    fn parses_here_string_and_heredoc_redirects() {
+        let parsed = parse_script("cat <<< hello; cat <<EOF\nbody\nEOF").unwrap();
+        let StepKind::Pipeline(first) = &parsed[0].kind else {
+            panic!("expected pipeline");
+        };
+        let StepKind::Pipeline(second) = &parsed[1].kind else {
+            panic!("expected pipeline");
+        };
+
+        match &first.commands[0].redirects[0] {
+            RedirectSpec::HereString(word) => assert_eq!(word.literal(), "hello"),
+            other => panic!("expected here-string, got {other:?}"),
+        }
+
+        match &second.commands[0].redirects[0] {
+            RedirectSpec::HereDoc(spec) => {
+                assert_eq!(spec.content, "body\n");
+                assert!(spec.expandable);
+            }
+            other => panic!("expected heredoc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_quoted_heredoc_without_expansion() {
+        let parsed = parse_script("cat <<'EOF'\n$NAME\nEOF").unwrap();
+        let StepKind::Pipeline(pipeline) = &parsed[0].kind else {
+            panic!("expected pipeline");
+        };
+
+        match &pipeline.commands[0].redirects[0] {
+            RedirectSpec::HereDoc(spec) => {
+                assert_eq!(spec.content, "$NAME\n");
+                assert!(!spec.expandable);
+            }
+            other => panic!("expected heredoc, got {other:?}"),
+        }
     }
 
     #[test]
