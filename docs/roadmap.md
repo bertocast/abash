@@ -1,72 +1,65 @@
 # Roadmap
 
-Command-name parity with `just-bash` is done. The remaining work is mostly behavior depth, runtime shape, backend maturity.
+Fresh compare basis: `just-bash` `origin/main` at `305c833` (`2026-04-06`).
 
-## Already In `just-bash`
+Command-name parity is still closed. The remaining work is mostly shell depth, exec/API surface, command behavior, and hardening.
 
-- richer custom commands with first-class shell composition
-- nested command execution from custom-command context
-- AST transform/plugin surface
-- multi-mount filesystem as a first-class public model
-- lazy files participating in direct reads and directory listings
-- broader shell control flow: `case`, `return`, `break`, `continue`
-- command substitution and subshell execution
-- deeper builtin behavior across `awk`, `jq`, `yq`, `xan`, `curl`, `sqlite3`, `tar`, `python3`
-- per-exec shell reset as the default model
-- stronger JavaScript isolation direction through QuickJS/WASM
+## Main Differences From `just-bash`
 
-## Partial In `just-bash`
+- shell language: `just-bash` already has heredocs, `rawScript`, broader function syntax, and deeper redirection/parser coverage
+- exec/API surface: `just-bash` already exposes `args`, `rawScript`, `signal`, richer execution limits, logger hooks, and trace hooks
+- extension surface: `just-bash` already has AST transform plugins and a first-class transform pipeline
+- builtin depth: `find`, `curl`, `awk`, `jq`, `yq`, `ls`, `printf`, and archive/compression behavior are all materially deeper upstream
+- security/hardening: `just-bash` already ships a larger defense-in-depth, security-logging, and fuzzing surface
+- runtime isolation: `just-bash` still has the stronger `js-exec` direction through QuickJS instead of the current host-runtime path in `abash`
 
-- detached command handles exist, but logs are still buffered after completion rather than truly live
-- sandbox command APIs cover `wait`, `kill`, `stdout`, `stderr`, `output`, `logs`, but not a session-owned retained event/audit model
-- network tooling is broader, but still policy-driven rather than a full unrestricted runtime
-- shell breadth is much higher, but still not complete GNU/bash fidelity
+## Tier 1: Shell And Exec Surface
 
-## `abash`-Specific Next Work
+- [ ] add heredocs and here-strings, plus the parser/runtime plumbing they need
+- [ ] add `raw_script=True` so multi-line scripts can preserve leading whitespace when needed
+- [ ] add argv-bypass `args=[...]` support for first-command execution without shell parsing
+- [ ] expose richer execution limits beyond timeout/output size: call depth, command count, loop iterations, and heredoc/input size
+- [ ] add structured logger/trace hooks on the Python API so embedders can observe execution without scraping run events
+- [ ] make binary-output handling explicit at the API boundary instead of treating everything as UTF-8 text
 
-### Tier 1: Runtime And Embedding
+## Tier 2: High-Value Builtin Depth
 
-- [x] add live stdout/stderr/event streaming instead of buffered snapshots only
-- [x] broaden detached execution beyond one active run per `Bash` session
-- [x] retain a stronger session-owned event/audit model as runs grow more capable
-- [x] deepen custom-command context with explicit supported runtime metadata
-- [x] let custom commands invoke nested sandbox work through a narrow stable helper surface
+- [ ] deepen `find` toward real workflow coverage: boolean operators, more predicates, `-exec`, and `-printf`
+- [ ] deepen `curl`: forms, cookies, uploads, verbose output, and `--write-out`
+- [ ] deepen `awk`: user functions, array iteration, `getline`, `nextfile`, ternary, and broader `printf` formatting
+- [ ] deepen `jq`: reducers, variables, richer string/date/control builtins, and broader update semantics
+- [ ] deepen `yq` alongside `jq`, especially edit behavior and broader function coverage
+- [ ] deepen formatting/file-inspection commands where upstream already has better agent ergonomics: `ls`, `printf`, `date`, `du`, `tree`
+- [ ] evaluate bzip2 archive/compression support now that upstream has started expanding there too
 
-### Tier 2: Filesystem And Providers
+## Tier 3: Extension And Instrumentation
 
-- [x] make listing-capable lazy file providers visible to directory-oriented operations too: `find`, `ls`, `tree`, Python file helpers
-- [x] keep broader mount adapter types out of the main product line for now; explicit `host_mounts=[HostMount(...)]` stays the supported host model
-- [x] keep `host_cow` delete semantics non-whiteout; deleting host-backed paths remains unsupported by design
+- [ ] add an AST transform pipeline, not only top-level pre/post request hooks
+- [ ] ship one or two built-in transforms first, likely command collection and tee-style output instrumentation
+- [ ] let custom commands participate in richer shell-level composition without relying only on top-level hooks
+- [ ] define how transform metadata should flow into `ExecutionResult`, run events, and audit events
 
-### Tier 3: Shell And Builtins
+## Tier 4: Security And Hardening
 
-- [x] add `case`
-- [x] add `return` inside script functions
-- [x] add `break`
-- [x] add `continue`
-- [x] evaluate command substitution
-- [x] evaluate subshell execution
-- [x] deepen `awk`, `jq`, `yq`, `xan`, `curl`, `sqlite3`, `tar`, `python3`, `js-exec` where narrow behavior still blocks real workflows
+- [ ] add a configurable defense-in-depth layer for higher-risk runtimes and extension paths
+- [ ] add security-violation logging/callbacks so embedders can observe blocked behavior
+- [ ] broaden attack-regression coverage around custom commands, nested exec, parser edge cases, and high-risk builtins
+- [ ] evaluate a public fuzzing / coverage story for the shell parser and builtin surface
 
-### Tier 4: Backend Maturity
+## Tier 5: Runtime Direction
 
-- [x] activate the Linux real-shell backend behind the intended isolation model
-- [x] define the long-term story for `nsjail` vs any alternative Linux sandbox strategy
-- [x] decide whether a stronger JavaScript isolation mode is worth adding alongside host-runtime `js-exec`
+- [ ] re-evaluate `js-exec` isolation against the current upstream QuickJS direction
+- [ ] decide whether `python3` should stay host-runtime only or gain a stronger isolation track
+- [ ] keep `nsjail` real-shell work separate from this parity track unless it starts blocking the higher-value virtual-shell work above
 
-### Tier 5: Product Defaults To Revisit Only With Demand
+## Deliberate Differences To Keep Unless Demand Changes
 
-- [x] re-evaluate the default session model if most embedders prefer `per_exec` over persistent shell state
-- [x] re-evaluate AST/plugin rewrite hooks if custom-command demand grows past the current top-level hooks
-- [x] re-evaluate full GNU/bash fidelity only when narrow behavior keeps blocking real workflows
+- [ ] keep session-persistent shell state as the default unless embedder feedback shifts clearly toward `per_exec`
+- [ ] keep workflow-first compatibility as the product bar, not full GNU/bash fidelity
+- [ ] keep explicit host mount policy as the public filesystem model rather than copying every upstream filesystem abstraction
 
 ## Notes
 
 - `docs/known-limitations.md` remains the honest source for current behavior.
-- this roadmap tracks the next valuable lifts, not every missing flag
-- `just-bash` is a useful reference point, but not every upstream choice should become a default in `abash`
-- Tier 4 decision: Linux real-shell work stays centered on `nsjail` for now; no second Linux sandbox backend is planned until the current path blocks a real deployment need.
-- Tier 4 decision: `js-exec` stays host-runtime based for now; a stronger isolated JavaScript runtime is deferred unless threat-model or embedding demand changes materially.
-- Tier 5 decision: session-persistent shell state stays the default; `session_state="per_exec"` remains the explicit opt-in for embedders that want reset-on-each-call semantics.
-- Tier 5 decision: top-level hooks plus current custom-command composition remain the supported extension model; AST/plugin rewrite hooks are deferred until real embedder demand appears.
-- Tier 5 decision: `abash` stays workflow-first rather than chasing full GNU/bash fidelity; shell and builtin depth should continue to grow only where narrow behavior blocks real use cases.
+- this roadmap is about the highest-value remaining differences, not every missing flag.
+- some upstream behavior is useful reference, not automatic product direction.
